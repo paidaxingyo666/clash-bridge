@@ -19,8 +19,8 @@ services:
     ports:
       - "${BACKEND_PORT}:8080"
     networks:
-      - default       # 暴露 frontend 用
-      - pgnet         # 连 superagent-pg
+      - default       # 给 frontend 用
+      - pgnet         # 连宿主的 postgres 容器
 
   frontend:
     build:
@@ -41,6 +41,10 @@ services:
 
 networks:
   default:
+  # pgnet 是宿主已有的 PostgreSQL 容器所在的 docker network.
+  # 把下面 name 改成你的 (docker network ls 看), 这样 backend 可以用
+  # 容器名 (如 `<pg-container>:5432`) 连 DB. 若改用其它连接方式 (host gateway 等)
+  # 可以删掉 pgnet 引用并相应改 DATABASE_URL.
   pgnet:
     name: pg-docker_default
     external: true

@@ -7,7 +7,7 @@
 ```
 backend/         Rust + Axum + sqlx (PostgreSQL) — REST API + 订阅生成
 frontend/        Next.js 15 App Router + TypeScript + Tailwind
-deploy/          生产部署 (docker-compose, 连接 superagent-pg)
+deploy/          docker-compose 部署 (复用宿主已有 PostgreSQL)
 ```
 
 链路设计：
@@ -36,14 +36,13 @@ npm run dev
 
 数据库 migration 在 `backend/migrations/`, 后端启动自动 apply.
 
-## 生产部署 (192.168.0.177)
+## Docker 部署
 
 详见 [deploy/README.md](deploy/README.md)：
 
-- 服务器：`192.168.0.177`, Ubuntu 24.04 + Docker 29.2.0
-- 数据库：复用宿主已有 `superagent-pg` 容器，独立 db / user `clash_bridge`
-- 端口：backend `17877`, frontend `17878`
-- 入口：http://192.168.0.177:17878
+- 复用宿主已有 PostgreSQL 容器（在 `deploy/.env` 里配 `DATABASE_URL` 即可）
+- 默认端口：backend `17877`, frontend `17878`
+- 入口：`http://<your-host>:17878`
 
 ## 关键文件
 
