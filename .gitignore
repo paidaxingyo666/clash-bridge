@@ -12,6 +12,8 @@ frontend/tsconfig.tsbuildinfo
 # 部署敏感信息
 deploy/.env
 deploy/secrets.local.env
+deploy/*secrets*.env
+deploy/*-secrets*.env
 
 # 日志
 logs/

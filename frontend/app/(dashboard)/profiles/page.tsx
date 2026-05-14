@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
 import { ProfileEditor } from "@/components/profile-editor";
 import { HistoryDialog } from "@/components/history-dialog";
-import { api, API_BASE } from "@/lib/api";
+import { api, PUBLIC_URL } from "@/lib/api";
 import type {
   ExitNode,
   GenerateResult,
@@ -113,7 +113,11 @@ export default function ProfilesPage() {
   }
 
   function subUrl(p: OutputProfile) {
-    return `${API_BASE.replace(/\/$/, "")}/sub/${p.sub_token}/clash.yaml`;
+    // 优先用 build-time 注入的 PUBLIC_URL; 没设就用浏览器当前 origin
+    const base =
+      PUBLIC_URL ||
+      (typeof window !== "undefined" ? window.location.origin : "");
+    return `${base.replace(/\/$/, "")}/sub/${p.sub_token}/clash.yaml`;
   }
 
   async function copyUrl(p: OutputProfile) {

@@ -1,7 +1,9 @@
 import { getToken } from "./auth";
 
-export const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8080";
+/// 前端对外可见的 URL (用于展示给用户复制的订阅地址).
+/// 留空时会走当前页面域名 — 比如部署在 https://example.com 上, 订阅地址就是
+/// https://example.com/sub/.../clash.yaml. 本地开发可以填 http://127.0.0.1:8080.
+export const PUBLIC_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "";
 
 export type ApiError = { error: string };
 
@@ -18,7 +20,8 @@ async function request<T>(
     const t = getToken();
     if (t) h["Authorization"] = `Bearer ${t}`;
   }
-  const resp = await fetch(`${API_BASE}${path}`, { ...rest, headers: h });
+  // 一律走相对路径; Next.js rewrite 会反代到 backend (见 next.config.mjs).
+  const resp = await fetch(path, { ...rest, headers: h });
   const text = await resp.text();
   let data: unknown = null;
   try {

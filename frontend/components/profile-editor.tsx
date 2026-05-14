@@ -14,7 +14,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { NodePicker } from "@/components/node-picker";
 import { YamlDiff } from "@/components/yaml-diff";
-import { api, API_BASE } from "@/lib/api";
+import { api } from "@/lib/api";
 import type { ExitNode, OutputProfile, UpstreamNode } from "@/lib/types";
 import { Cloud, Eye, Loader2 } from "lucide-react";
 
@@ -214,8 +214,8 @@ export function ProfileEditor({
       const token = localStorage.getItem("cb_token") || "";
       const headers = { Authorization: `Bearer ${token}` };
       const [newResp, upResp] = await Promise.all([
-        fetch(`${API_BASE}/api/profiles/${editingId}/preview`, { headers }),
-        fetch(`${API_BASE}/api/profiles/${editingId}/upstream`, { headers }),
+        fetch(`/api/profiles/${editingId}/preview`, { headers }),
+        fetch(`/api/profiles/${editingId}/upstream`, { headers }),
       ]);
       const newText = await newResp.text();
       const upText = await upResp.text();

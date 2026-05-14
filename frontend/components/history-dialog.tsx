@@ -11,14 +11,14 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { YamlDiff } from "@/components/yaml-diff";
-import { api, API_BASE } from "@/lib/api";
+import { api } from "@/lib/api";
 import type { HistoryItem } from "@/lib/types";
 import { Loader2 } from "lucide-react";
 import { cn } from "@/lib/cn";
 
 async function fetchText(path: string): Promise<string> {
   const token = localStorage.getItem("cb_token") || "";
-  const r = await fetch(`${API_BASE}${path}`, {
+  const r = await fetch(path, {
     headers: { Authorization: `Bearer ${token}` },
   });
   const text = await r.text();
