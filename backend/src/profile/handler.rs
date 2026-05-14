@@ -1,0 +1,204 @@
+use axum::extract::{Path, State};
+use axum::http::header;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use axum::Json;
+use serde::Serialize;
+use uuid::Uuid;
+
+use crate::error::{AppError, AppResult};
+use crate::generator::{service as gen_service, yaml as gen_yaml};
+use crate::middleware::AuthUser;
+use crate::profile::{model::*, repo, service};
+use crate::state::AppState;
+
+pub async fn list(
+    State(s): State<AppState>,
+    user: AuthUser,
+) -> AppResult<Json<Vec<OutputProfileView>>> {
+    let rows = repo::list_by_user(&s.db, user.id).await?;
+    Ok(Json(rows.iter().map(OutputProfileView::from).collect()))
+}
+
+fn validate_input(input: &ProfileInput) -> AppResult<()> {
+    if input.name.trim().is_empty() {
+        return Err(AppError::BadRequest("name required".into()));
+    }
+    if input.upstream_url.trim().is_empty() {
+        return Err(AppError::BadRequest("upstream_url required".into()));
+    }
+    Ok(())
+}
+
+pub async fn create(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Json(input): Json<ProfileInput>,
+) -> AppResult<Json<OutputProfileView>> {
+    validate_input(&input)?;
+    let row = repo::create(
+        &s.db,
+        user.id,
+        input.name.trim(),
+        &repo::gen_sub_token(),
+        input.upstream_url.trim(),
+        &input.bridge_node_names,
+        &input.exit_node_ids,
+        input.custom_rules.as_deref(),
+        input.enabled.unwrap_or(true),
+    )
+    .await?;
+    Ok(Json(OutputProfileView::from(&row)))
+}
+
+pub async fn update(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+    Json(input): Json<ProfileInput>,
+) -> AppResult<Json<OutputProfileView>> {
+    validate_input(&input)?;
+    let row = repo::update(
+        &s.db,
+        user.id,
+        id,
+        input.name.trim(),
+        input.upstream_url.trim(),
+        &input.bridge_node_names,
+        &input.exit_node_ids,
+        input.custom_rules.as_deref(),
+        input.enabled.unwrap_or(true),
+    )
+    .await?
+    .ok_or(AppError::NotFound)?;
+    Ok(Json(OutputProfileView::from(&row)))
+}
+
+pub async fn delete(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<serde_json::Value>> {
+    let n = repo::delete(&s.db, user.id, id).await?;
+    if n == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(serde_json::json!({ "deleted": n })))
+}
+
+#[derive(Debug, Serialize)]
+pub struct TokenView {
+    pub sub_token: String,
+}
+
+pub async fn reset_token(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<TokenView>> {
+    let new_token = repo::gen_sub_token();
+    let row = repo::reset_token(&s.db, user.id, id, &new_token)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(Json(TokenView {
+        sub_token: row.sub_token,
+    }))
+}
+
+pub async fn refresh_upstream(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<OutputProfileView>> {
+    service::refresh_upstream(&s.db, &s.http, user.id, id, service::TRIGGER_MANUAL).await?;
+    let row = repo::find(&s.db, user.id, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(Json(OutputProfileView::from(&row)))
+}
+
+/// 返回 profile 上次拉到的上游中所有节点 (供前端复选框 UI)
+pub async fn list_upstream_nodes(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<Vec<UpstreamNode>>> {
+    let profile = repo::find(&s.db, user.id, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let yaml = profile
+        .last_upstream_yaml
+        .as_deref()
+        .ok_or_else(|| AppError::BadRequest("no cached upstream yaml. refresh first.".into()))?;
+    Ok(Json(gen_yaml::extract_nodes(yaml)?))
+}
+
+/// 返回 profile 最近一次拉到的上游 yaml 原文 (供前端 diff 对照展示)
+pub async fn get_upstream_yaml(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> AppResult<axum::response::Response> {
+    let profile = repo::find(&s.db, user.id, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let yaml = profile
+        .last_upstream_yaml
+        .ok_or_else(|| AppError::BadRequest("no cached upstream yaml. refresh first.".into()))?;
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/yaml; charset=utf-8")],
+        yaml,
+    )
+        .into_response())
+}
+
+#[derive(Debug, Serialize)]
+pub struct GenerateView {
+    pub upstream_count: i32,
+    pub bridge_count: i32,
+    pub chain_count: i32,
+    pub missing_bridges: Vec<String>,
+    pub sub_url: String,
+}
+
+fn sub_url(base: &str, token: &str) -> String {
+    format!("{}/sub/{}/clash.yaml", base.trim_end_matches('/'), token)
+}
+
+/// 生成并写入缓存
+pub async fn generate(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> AppResult<Json<GenerateView>> {
+    let out = gen_service::build_and_cache(&s.db, user.id, id).await?;
+    let p = repo::find(&s.db, user.id, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(Json(GenerateView {
+        upstream_count: out.upstream_count,
+        bridge_count: out.bridge_count,
+        chain_count: out.chain_count,
+        missing_bridges: out.missing_bridges,
+        sub_url: sub_url(&s.config.public_base_url, &p.sub_token),
+    }))
+}
+
+/// 临时生成并返回 yaml 文本 (不写库)
+pub async fn preview(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+) -> AppResult<axum::response::Response> {
+    let p = repo::find(&s.db, user.id, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let out = gen_service::build_for_profile(&s.db, user.id, &p).await?;
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/yaml; charset=utf-8")],
+        out.yaml,
+    )
+        .into_response())
+}

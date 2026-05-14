@@ -1,0 +1,25 @@
+# Rust
+backend/target/
+backend/.env
+
+# Node / Next
+frontend/node_modules/
+frontend/.next/
+frontend/.env
+frontend/.env.local
+frontend/tsconfig.tsbuildinfo
+
+# 部署敏感信息
+deploy/.env
+deploy/secrets.local.env
+
+# 日志
+logs/
+*.log
+
+# 编辑器 / 系统垃圾
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo

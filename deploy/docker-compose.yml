@@ -1,0 +1,46 @@
+name: clash-bridge
+
+services:
+  backend:
+    build:
+      context: ../backend
+    image: clash-bridge-backend:local
+    container_name: clash-bridge-backend
+    restart: unless-stopped
+    environment:
+      BIND_ADDR: 0.0.0.0:8080
+      DATABASE_URL: ${DATABASE_URL}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRE_HOURS: "168"
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      UPSTREAM_FETCH_TIMEOUT_SECS: "20"
+      AUTO_REFRESH_INTERVAL_SECS: "3600"
+      RUST_LOG: info,clash_bridge=info
+    ports:
+      - "${BACKEND_PORT}:8080"
+    networks:
+      - default       # 暴露 frontend 用
+      - pgnet         # 连 superagent-pg
+
+  frontend:
+    build:
+      context: ../frontend
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL}
+    image: clash-bridge-frontend:local
+    container_name: clash-bridge-frontend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+    ports:
+      - "${FRONTEND_PORT}:3000"
+    depends_on:
+      - backend
+    networks:
+      - default
+
+networks:
+  default:
+  pgnet:
+    name: pg-docker_default
+    external: true
