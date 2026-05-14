@@ -1,0 +1,82 @@
+# standalone 部署: 全套 (postgres + backend + frontend [+ cloudflared]) 都跑容器,
+# 不依赖宿主已有 PG. 默认不暴露端口到公网, 只在 127.0.0.1 监听.
+#
+# 用法:
+#   cp .env.standalone.example .env
+#   编辑 .env 填密码
+#   docker compose -f docker-compose.standalone.yml up -d --build
+#
+# 走 Cloudflare Tunnel (无需开公网端口, 走 HTTPS 边缘加密):
+#   在 .env 里填 CLOUDFLARE_TUNNEL_TOKEN
+#   docker compose -f docker-compose.standalone.yml --profile cloudflare up -d
+#
+name: clash-bridge
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: clash-bridge-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: clash_bridge
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: clash_bridge
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clash_bridge -d clash_bridge"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: ../backend
+    image: clash-bridge-backend:local
+    container_name: clash-bridge-backend
+    restart: unless-stopped
+    environment:
+      BIND_ADDR: 0.0.0.0:8080
+      DATABASE_URL: postgres://clash_bridge:${POSTGRES_PASSWORD}@postgres:5432/clash_bridge
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRE_HOURS: "168"
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      UPSTREAM_FETCH_TIMEOUT_SECS: "20"
+      AUTO_REFRESH_INTERVAL_SECS: "3600"
+      RUST_LOG: info,clash_bridge=info
+    ports:
+      # 只在 127.0.0.1 暴露; 公网不可达, 给 cloudflared / 本机调试用
+      - "127.0.0.1:${BACKEND_PORT:-17877}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ../frontend
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL}
+    image: clash-bridge-frontend:local
+    container_name: clash-bridge-frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-17878}:3000"
+    depends_on:
+      - backend
+
+  # Cloudflare Tunnel: 默认不启动 (profiles 控制).
+  # 在 Cloudflare Zero Trust 后台创建 tunnel 拿到 token 后, 在 .env 里填
+  # CLOUDFLARE_TUNNEL_TOKEN=..., 再用 --profile cloudflare 启动.
+  # tunnel 内部走 docker network 用容器名连 frontend:3000 / backend:8080.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: clash-bridge-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    profiles: [cloudflare]
+    depends_on:
+      - frontend
+      - backend
+
+volumes:
+  pgdata:
