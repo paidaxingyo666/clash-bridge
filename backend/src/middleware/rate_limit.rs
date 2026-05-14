@@ -22,6 +22,8 @@ impl KeyExtractor for CfConnectingIpExtractor {
             .and_then(|s| s.split(',').next())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
-        ip.ok_or(tower_governor::GovernorError::UnableToExtractKey)
+        // 拿不到 IP (本机 curl / 内部探活) 时退化到固定桶, 避免 500.
+        // 真实流量从 Cloudflare 进来必带 cf-connecting-ip, 不会走到这.
+        Ok(ip.unwrap_or_else(|| "no-ip-fallback".to_string()))
     }
 }
