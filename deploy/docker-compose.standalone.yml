@@ -55,13 +55,12 @@ services:
     build:
       context: ../frontend
       args:
+        # 这两个都是 Next.js build-time 注入的, runtime 改没用
         NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL}
+        BACKEND_INTERNAL_URL: http://backend:8080
     image: clash-bridge-frontend:local
     container_name: clash-bridge-frontend
     restart: unless-stopped
-    environment:
-      # next.config.mjs 用这个变量做 /api/* /sub/* 反代到 backend
-      BACKEND_INTERNAL_URL: http://backend:8080
     ports:
       - "127.0.0.1:${FRONTEND_PORT:-17878}:3000"
     depends_on:

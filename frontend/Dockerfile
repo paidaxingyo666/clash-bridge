@@ -15,6 +15,9 @@ RUN mkdir -p public
 # NEXT_PUBLIC_* 必须在 build 时存在 (浏览器侧代码会被打入静态产物)
 ARG NEXT_PUBLIC_API_BASE_URL
 ENV NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL}
+# rewrites 的反代 target 也在 build 时被烤进 .next, 必须 build 时设好
+ARG BACKEND_INTERNAL_URL=http://backend:8080
+ENV BACKEND_INTERNAL_URL=${BACKEND_INTERNAL_URL}
 RUN npm run build
 
 # --- runtime ---
