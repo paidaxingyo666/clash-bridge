@@ -43,6 +43,7 @@ services:
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
       UPSTREAM_FETCH_TIMEOUT_SECS: "20"
       AUTO_REFRESH_INTERVAL_SECS: "3600"
+      TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:-}
       RUST_LOG: info,clash_bridge=info
     ports:
       # 只在 127.0.0.1 暴露; 公网不可达, 给 cloudflared / 本机调试用
@@ -55,9 +56,10 @@ services:
     build:
       context: ../frontend
       args:
-        # 这两个都是 Next.js build-time 注入的, runtime 改没用
+        # 这几个都是 Next.js build-time 注入的, runtime 改没用
         NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL}
         BACKEND_INTERNAL_URL: http://backend:8080
+        NEXT_PUBLIC_TURNSTILE_SITE_KEY: ${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}
     image: clash-bridge-frontend:local
     container_name: clash-bridge-frontend
     restart: unless-stopped

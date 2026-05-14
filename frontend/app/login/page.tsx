@@ -9,8 +9,10 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { api } from "@/lib/api";
 import { saveAuth } from "@/lib/auth";
 import type { AuthOutput } from "@/lib/types";
+import { Turnstile, hasTurnstileSiteKey } from "@/components/turnstile";
 
 const USERNAME_RE = /^[A-Za-z0-9_.-]+$/;
+const TURNSTILE_ENABLED = hasTurnstileSiteKey();
 
 export default function LoginPage() {
   const router = useRouter();
@@ -18,6 +20,7 @@ export default function LoginPage() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
+  const [turnstileToken, setTurnstileToken] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -30,6 +33,8 @@ export default function LoginPage() {
       if (password.length < 6) return "密码至少 6 位";
       if (password.length > 128) return "密码不能超过 128 字节";
       if (password !== confirm) return "两次密码不一致";
+      if (TURNSTILE_ENABLED && !turnstileToken)
+        return "请完成人机验证";
     } else {
       if (!u) return "请输入用户名";
       if (!password) return "请输入密码";
@@ -48,11 +53,14 @@ export default function LoginPage() {
     setLoading(true);
     try {
       const path = mode === "login" ? "/api/auth/login" : "/api/auth/register";
-      const out = await api.post<AuthOutput>(
-        path,
-        { username: username.trim(), password },
-        false,
-      );
+      const body: Record<string, unknown> = {
+        username: username.trim(),
+        password,
+      };
+      if (mode === "register" && turnstileToken) {
+        body.cf_turnstile_token = turnstileToken;
+      }
+      const out = await api.post<AuthOutput>(path, body, false);
       saveAuth(out.token, out.user);
       router.push("/profiles");
     } catch (e: any) {
@@ -66,6 +74,7 @@ export default function LoginPage() {
     setMode(mode === "login" ? "register" : "login");
     setErr(null);
     setConfirm("");
+    setTurnstileToken("");
   }
 
   return (
@@ -123,6 +132,9 @@ export default function LoginPage() {
                   placeholder="再次输入密码"
                 />
               </div>
+            )}
+            {mode === "register" && TURNSTILE_ENABLED && (
+              <Turnstile onToken={setTurnstileToken} />
             )}
             {err && <div className="text-sm text-destructive">{err}</div>}
             <Button type="submit" disabled={loading} className="w-full">

@@ -1,8 +1,9 @@
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{jwt, password};
+use crate::auth::{jwt, password, turnstile};
 use crate::error::{AppError, AppResult};
 use crate::middleware::AuthUser;
 use crate::state::AppState;
@@ -12,6 +13,20 @@ use crate::user::{model::UserView, repo as user_repo};
 pub struct AuthInput {
     pub username: String,
     pub password: String,
+    /// Cloudflare Turnstile token, 仅注册接口校验. 若 env 没配 TURNSTILE_SECRET_KEY
+    /// 则跳过(向后兼容本地开发).
+    #[serde(default)]
+    pub cf_turnstile_token: Option<String>,
+}
+
+fn client_ip(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("cf-connecting-ip")
+        .or_else(|| headers.get("x-forwarded-for"))
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 #[derive(Debug, Serialize)]
@@ -70,11 +85,24 @@ fn is_unique_violation(e: &AppError) -> bool {
 
 pub async fn register(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(input): Json<AuthInput>,
 ) -> AppResult<Json<AuthOutput>> {
     let username = normalize_username(&input.username);
     validate_username(&username)?;
     validate_password(&input.password)?;
+
+    // 若配了 Turnstile secret, 强制校验; 否则跳过(向后兼容)
+    if let Some(secret) = state.config.turnstile_secret_key.as_deref() {
+        let token = input
+            .cf_turnstile_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| AppError::BadRequest("缺少验证码".into()))?;
+        let ip = client_ip(&headers);
+        turnstile::verify(&state.http, secret, token, ip.as_deref()).await?;
+    }
 
     let hash = password::hash_password(&input.password)?;
     let user = match user_repo::create(&state.db, &username, &hash).await {

@@ -18,6 +18,10 @@ ENV NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL}
 # rewrites 的反代 target 也在 build 时被烤进 .next, 必须 build 时设好
 ARG BACKEND_INTERNAL_URL=http://backend:8080
 ENV BACKEND_INTERNAL_URL=${BACKEND_INTERNAL_URL}
+# Cloudflare Turnstile site key (公开, 嵌进 JS bundle). 不配则前端不渲染 widget,
+# 后端也得不配 TURNSTILE_SECRET_KEY 才不会强制校验.
+ARG NEXT_PUBLIC_TURNSTILE_SITE_KEY=
+ENV NEXT_PUBLIC_TURNSTILE_SITE_KEY=${NEXT_PUBLIC_TURNSTILE_SITE_KEY}
 RUN npm run build
 
 # --- runtime ---

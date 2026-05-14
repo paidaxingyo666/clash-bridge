@@ -10,6 +10,8 @@ pub struct AppConfig {
     pub upstream_fetch_timeout_secs: u64,
     /// 自动刷新所有 enabled profile 的间隔 (秒). 0 表示关闭自动刷新.
     pub auto_refresh_interval_secs: u64,
+    /// Cloudflare Turnstile secret. 配了就强制注册接口校验, 没配则跳过.
+    pub turnstile_secret_key: Option<String>,
 }
 
 impl AppConfig {
@@ -34,6 +36,10 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(3600),
+            turnstile_secret_key: env::var("TURNSTILE_SECRET_KEY")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
         })
     }
 }

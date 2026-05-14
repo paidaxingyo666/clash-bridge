@@ -1,8 +1,12 @@
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
 use axum::extract::{Path, State};
 use axum::http::header;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use chrono::Utc;
+use dashmap::DashMap;
 use tracing::warn;
 
 use crate::error::{AppError, AppResult};
@@ -13,6 +17,25 @@ use crate::state::AppState;
 /// 客户端访问 /sub 时, 距上次成功拉取上游不到这个秒数就不再实时拉, 用缓存的 last_upstream_yaml 重新生成.
 /// 防止客户端高频拉订阅时反复打机场 / 被 ban IP.
 const SUB_MIN_REFRESH_SECS: i64 = 30;
+
+/// 每个 sub_token 一分钟内允许的访问次数. 超过的请求**不会被拒绝**, 但会跳过
+/// 实时拉上游, 直接走 cached_yaml — 这样能保证客户端拉订阅永远不失败, 同时
+/// 防止 token 泄漏后被高频拉、拖累机场 / 我们的服务.
+const SUB_RATE_PER_MIN: usize = 5;
+
+static SUB_HITS: OnceLock<DashMap<String, Vec<Instant>>> = OnceLock::new();
+
+/// 记录这次访问, 返回"是否仍在配额内 (可以实时拉机场)".
+fn within_sub_rate(token: &str) -> bool {
+    let map = SUB_HITS.get_or_init(DashMap::new);
+    let now = Instant::now();
+    let window = Duration::from_secs(60);
+    let mut entry = map.entry(token.to_string()).or_default();
+    entry.retain(|t| now.duration_since(*t) < window);
+    let allowed = entry.len() < SUB_RATE_PER_MIN;
+    entry.push(now);
+    allowed
+}
 
 /// GET /sub/:token/clash.yaml — 公开. 每次请求实时拉上游 + 实时生成 yaml.
 /// 失败 (上游不可达 / 解析失败 etc) 时回退到 cached_yaml.
@@ -27,11 +50,22 @@ pub async fn public_subscription(
         return Err(AppError::NotFound);
     }
 
-    // 1. 实时拉一次上游 (受 SUB_MIN_REFRESH_SECS 节流). 失败不致命.
-    let should_refresh = match profile.last_upstream_fetched_at {
-        Some(t) => (Utc::now() - t).num_seconds() >= SUB_MIN_REFRESH_SECS,
-        None => true,
+    // 1. 实时拉一次上游, 受三层节流:
+    //    a) SUB_MIN_REFRESH_SECS:  距上次成功拉 < 30s 不重拉
+    //    b) within_sub_rate:        每 token 每分钟最多 SUB_RATE_PER_MIN 次实时拉,
+    //                              超过则走 cached_yaml (不拒绝客户端)
+    let rate_ok = within_sub_rate(&token);
+    let recent_enough = match profile.last_upstream_fetched_at {
+        Some(t) => (Utc::now() - t).num_seconds() < SUB_MIN_REFRESH_SECS,
+        None => false,
     };
+    let should_refresh = rate_ok && !recent_enough;
+    if !rate_ok {
+        warn!(
+            sub_token_prefix = &token[..token.len().min(8)],
+            "/sub: token rate limit hit, serving from cache"
+        );
+    }
     if should_refresh {
         if let Err(e) = profile_service::refresh_upstream_by_profile(
             &s.db,
