@@ -1,5 +1,5 @@
 use axum::extract::{Path, State};
-use axum::http::header;
+use axum::http::{header, HeaderMap};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
@@ -162,6 +162,24 @@ pub struct GenerateView {
     pub sub_url: String,
 }
 
+/// 优先从请求头反推用户当前访问的 base URL (host + scheme), fallback 到 PUBLIC_BASE_URL 配置.
+/// 这样无论部署在哪个域名后面 (kaiyu.uk / clash.kaiyu.uk / 直连 IP), 生成的订阅 URL 都跟用户当前
+/// 访问的域名一致. cloudflare / nginx / next.js rewrite 都会带 X-Forwarded-* 头.
+fn resolve_base_url(headers: &HeaderMap, fallback: &str) -> String {
+    let host = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get(header::HOST))
+        .and_then(|h| h.to_str().ok());
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("https");
+    match host {
+        Some(h) if !h.is_empty() => format!("{scheme}://{h}"),
+        _ => fallback.to_string(),
+    }
+}
+
 fn sub_url(base: &str, token: &str) -> String {
     format!("{}/sub/{}/clash.yaml", base.trim_end_matches('/'), token)
 }
@@ -170,18 +188,20 @@ fn sub_url(base: &str, token: &str) -> String {
 pub async fn generate(
     State(s): State<AppState>,
     user: AuthUser,
+    headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> AppResult<Json<GenerateView>> {
     let out = gen_service::build_and_cache(&s.db, user.id, id).await?;
     let p = repo::find(&s.db, user.id, id)
         .await?
         .ok_or(AppError::NotFound)?;
+    let base = resolve_base_url(&headers, &s.config.public_base_url);
     Ok(Json(GenerateView {
         upstream_count: out.upstream_count,
         bridge_count: out.bridge_count,
         chain_count: out.chain_count,
         missing_bridges: out.missing_bridges,
-        sub_url: sub_url(&s.config.public_base_url, &p.sub_token),
+        sub_url: sub_url(&base, &p.sub_token),
     }))
 }
 
