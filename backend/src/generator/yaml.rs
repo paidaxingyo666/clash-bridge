@@ -23,6 +23,12 @@ pub struct GenerateOutput {
 
 const BRIDGE_GROUP_NAME: &str = "Bridge-Exit";
 
+/// url-test 子组的测速地址。
+/// 不用 Google 系 HTTPS(gstatic/google): 其 TLS 握手包较大, 经固定出口隧道易撞 MTU,
+/// 导致延迟测试误报 timeout(节点实际可正常使用)。改用 Cloudflare anycast 的 generate_204:
+/// 握手包小、全球就近、无 DNS 污染, 实测经固定出口稳定可测。
+const LATENCY_TEST_URL: &str = "https://cp.cloudflare.com/generate_204";
+
 /// 注入式生成：保留上游 yaml 的 proxies / proxy-groups / rules / 顶层字段不变，
 /// 仅追加: 链路节点 + per-exit auto 组 + 聚合 Bridge-Exit 组,
 /// 并把 Bridge-Exit 名注入到所有原 type=select 分组的 proxies 数组首位。
@@ -151,7 +157,7 @@ pub fn generate(input: GenerateInput<'_>) -> AppResult<GenerateOutput> {
         g.insert(Value::String("type".into()), Value::String("url-test".into()));
         g.insert(
             Value::String("url".into()),
-            Value::String("https://www.gstatic.com/generate_204".into()),
+            Value::String(LATENCY_TEST_URL.into()),
         );
         g.insert(Value::String("interval".into()), Value::Number(300.into()));
         g.insert(
@@ -176,7 +182,7 @@ pub fn generate(input: GenerateInput<'_>) -> AppResult<GenerateOutput> {
     );
     bridge_auto_group.insert(
         Value::String("url".into()),
-        Value::String("https://www.gstatic.com/generate_204".into()),
+        Value::String(LATENCY_TEST_URL.into()),
     );
     bridge_auto_group.insert(
         Value::String("interval".into()),
