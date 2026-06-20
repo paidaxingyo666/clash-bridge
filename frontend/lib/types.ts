@@ -31,6 +31,7 @@ export type OutputProfile = {
 
   bridge_node_names: string[];
   exit_node_ids: string[];
+  fetch_via_exit_node_id: string | null;
 
   custom_rules: string | null;
   enabled: boolean;

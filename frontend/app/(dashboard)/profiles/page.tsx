@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
 import { ProfileEditor } from "@/components/profile-editor";
 import { HistoryDialog } from "@/components/history-dialog";
+import { QrDialog } from "@/components/qr-dialog";
 import { api, PUBLIC_URL } from "@/lib/api";
 import type {
   ExitNode,
@@ -19,6 +20,7 @@ import {
   Pencil,
   Trash2,
   Copy,
+  QrCode,
   Download,
   Sparkles,
   KeyRound,
@@ -32,6 +34,7 @@ export default function ProfilesPage() {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<OutputProfile | null>(null);
   const [historyFor, setHistoryFor] = useState<OutputProfile | null>(null);
+  const [qrFor, setQrFor] = useState<OutputProfile | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -210,13 +213,24 @@ export default function ProfilesPage() {
                                 : "text-destructive"
                             }
                           >
-                            {p.last_upstream_fetch_status}
+                            {p.last_upstream_fetch_status === "success"
+                              ? "成功"
+                              : "失败"}
                           </div>
                           {p.last_upstream_fetch_error && (
-                            <div className="text-destructive truncate max-w-[160px]">
+                            <div
+                              className="text-destructive truncate max-w-[180px] cursor-help"
+                              title={p.last_upstream_fetch_error}
+                            >
                               {p.last_upstream_fetch_error}
                             </div>
                           )}
+                          {p.last_upstream_fetch_status === "error" &&
+                            p.cached_at && (
+                              <Badge variant="warning" className="mt-1">
+                                使用缓存中
+                              </Badge>
+                            )}
                         </>
                       ) : (
                         <span className="text-muted-foreground">—</span>
@@ -268,6 +282,14 @@ export default function ProfilesPage() {
                           onClick={() => copyUrl(p)}
                         >
                           <Copy className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          title="订阅二维码"
+                          onClick={() => setQrFor(p)}
+                        >
+                          <QrCode className="h-4 w-4" />
                         </Button>
                         <a
                           href={url}
@@ -333,6 +355,13 @@ export default function ProfilesPage() {
         onOpenChange={(v) => !v && setHistoryFor(null)}
         profileId={historyFor?.id ?? null}
         profileName={historyFor?.name ?? ""}
+      />
+
+      <QrDialog
+        open={qrFor !== null}
+        onOpenChange={(v) => !v && setQrFor(null)}
+        url={qrFor ? subUrl(qrFor) : ""}
+        name={qrFor?.name}
       />
     </div>
   );

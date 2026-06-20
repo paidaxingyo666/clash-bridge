@@ -24,6 +24,17 @@ pub async fn list_enabled_by_user(db: &PgPool, user_id: Uuid) -> AppResult<Vec<E
     Ok(rows)
 }
 
+pub async fn find(db: &PgPool, user_id: Uuid, id: Uuid) -> AppResult<Option<ExitNode>> {
+    let row = sqlx::query_as::<_, ExitNode>(
+        "SELECT * FROM exit_nodes WHERE user_id = $1 AND id = $2",
+    )
+    .bind(user_id)
+    .bind(id)
+    .fetch_optional(db)
+    .await?;
+    Ok(row)
+}
+
 pub async fn create(
     db: &PgPool,
     user_id: Uuid,

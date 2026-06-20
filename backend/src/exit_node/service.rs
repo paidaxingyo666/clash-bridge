@@ -133,6 +133,46 @@ pub fn validate_proxy_yaml(yaml: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// 把 exit_node.proxy_yaml 转成 reqwest 能识别的 proxy URL.
+/// 仅支持 socks5 / http / https 类型: 这是 reqwest 原生支持的两类 proxy.
+/// vmess / trojan 等需要本地起 mihomo 才能用, 这里直接拒绝, 让前端把这类节点过滤掉.
+pub fn proxy_url_from_yaml(yaml: &str) -> AppResult<reqwest::Url> {
+    let v: serde_yaml::Value = serde_yaml::from_str(yaml)
+        .map_err(|e| AppError::BadRequest(format!("exit_node yaml 解析失败: {e}")))?;
+    let m = v
+        .as_mapping()
+        .ok_or_else(|| AppError::BadRequest("exit_node yaml 非 mapping".into()))?;
+
+    let ty = get_str(m, "type").ok_or_else(|| AppError::BadRequest("exit_node 缺 type".into()))?;
+    let server = get_str(m, "server")
+        .ok_or_else(|| AppError::BadRequest("exit_node 缺 server".into()))?;
+    let port = get_i64(m, "port")
+        .ok_or_else(|| AppError::BadRequest("exit_node port 必须是数字".into()))?;
+
+    let scheme = match ty {
+        "socks5" => "socks5",
+        "http" | "https" => "http",
+        other => {
+            return Err(AppError::BadRequest(format!(
+                "节点类型 {other} 不可作为订阅拉取代理 (仅支持 socks5 / http)"
+            )))
+        }
+    };
+
+    let mut url: reqwest::Url = format!("{scheme}://{server}:{port}")
+        .parse()
+        .map_err(|e| AppError::Internal(format!("构造 proxy URL 失败: {e}")))?;
+    if let Some(user) = get_str(m, "username") {
+        url.set_username(user)
+            .map_err(|_| AppError::Internal("set_username 失败".into()))?;
+    }
+    if let Some(pw) = get_str(m, "password") {
+        url.set_password(Some(pw))
+            .map_err(|_| AppError::Internal("set_password 失败".into()))?;
+    }
+    Ok(url)
+}
+
 fn get_str<'a>(m: &'a serde_yaml::Mapping, k: &str) -> Option<&'a str> {
     m.get(serde_yaml::Value::String(k.into()))
         .and_then(|v| v.as_str())

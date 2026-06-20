@@ -6,13 +6,14 @@ export function Badge({
   variant = "default",
   ...props
 }: React.HTMLAttributes<HTMLSpanElement> & {
-  variant?: "default" | "success" | "danger" | "muted";
+  variant?: "default" | "success" | "danger" | "muted" | "warning";
 }) {
   const styles = {
     default: "bg-primary text-primary-foreground",
     success: "bg-green-600 text-white",
     danger: "bg-destructive text-destructive-foreground",
     muted: "bg-muted text-foreground",
+    warning: "bg-amber-500 text-white",
   }[variant];
   return (
     <span

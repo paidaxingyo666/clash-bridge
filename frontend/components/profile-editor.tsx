@@ -23,6 +23,7 @@ type Form = {
   upstream_url: string;
   bridge_node_names: string[];
   exit_node_ids: string[];
+  fetch_via_exit_node_id: string | null;
   custom_rules: string;
   enabled: boolean;
 };
@@ -32,6 +33,7 @@ const empty: Form = {
   upstream_url: "",
   bridge_node_names: [],
   exit_node_ids: [],
+  fetch_via_exit_node_id: null,
   custom_rules: "",
   enabled: true,
 };
@@ -67,6 +69,7 @@ export function ProfileEditor({
         upstream_url: initial.upstream_url,
         bridge_node_names: initial.bridge_node_names,
         exit_node_ids: initial.exit_node_ids,
+        fetch_via_exit_node_id: initial.fetch_via_exit_node_id ?? null,
         custom_rules: initial.custom_rules ?? "",
         enabled: initial.enabled,
       });
@@ -116,6 +119,7 @@ export function ProfileEditor({
           upstream_url: form.upstream_url,
           bridge_node_names: [],
           exit_node_ids: form.exit_node_ids,
+          fetch_via_exit_node_id: form.fetch_via_exit_node_id,
           custom_rules: form.custom_rules || null,
           enabled: false, // 草稿
         });
@@ -170,6 +174,7 @@ export function ProfileEditor({
         upstream_url: form.upstream_url,
         bridge_node_names: form.bridge_node_names,
         exit_node_ids: form.exit_node_ids,
+        fetch_via_exit_node_id: form.fetch_via_exit_node_id,
         custom_rules: form.custom_rules || null,
         enabled: form.enabled,
       };
@@ -208,6 +213,7 @@ export function ProfileEditor({
         upstream_url: form.upstream_url,
         bridge_node_names: form.bridge_node_names,
         exit_node_ids: form.exit_node_ids,
+        fetch_via_exit_node_id: form.fetch_via_exit_node_id,
         custom_rules: form.custom_rules || null,
         enabled: form.enabled,
       });
@@ -295,6 +301,37 @@ export function ProfileEditor({
                 )}
                 拉取节点
               </Button>
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <Label>拉取上游时使用的代理（绕过 IP 封禁）</Label>
+            <select
+              className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              value={form.fetch_via_exit_node_id ?? ""}
+              onChange={(e) =>
+                setForm({
+                  ...form,
+                  fetch_via_exit_node_id: e.target.value || null,
+                })
+              }
+            >
+              <option value="">直连（默认）</option>
+              {exitNodes
+                .map((n) => ({
+                  ...n,
+                  _type: (n.proxy_yaml.match(/^\s*type:\s*([a-z0-9]+)/im)?.[1] ?? "").toLowerCase(),
+                }))
+                .filter((n) => n._type === "socks5" || n._type === "http")
+                .map((n) => (
+                  <option key={n.id} value={n.id}>
+                    {n.name}（{n._type}）
+                  </option>
+                ))}
+            </select>
+            <div className="text-xs text-muted-foreground">
+              某些机场对数据中心 IP 返回 403。指定一个 socks5/http 节点后，服务器拉上游订阅时会从该节点 IP 出去。
+              其他类型节点（vmess/trojan 等）此处不可选。
             </div>
           </div>
 

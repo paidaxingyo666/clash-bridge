@@ -54,13 +54,15 @@ pub async fn create(
     upstream_url: &str,
     bridge_node_names: &[String],
     exit_node_ids: &[Uuid],
+    fetch_via_exit_node_id: Option<Uuid>,
     custom_rules: Option<&str>,
     enabled: bool,
 ) -> AppResult<OutputProfile> {
     let row = sqlx::query_as::<_, OutputProfile>(
         "INSERT INTO output_profiles \
-         (user_id, name, sub_token, upstream_url, bridge_node_names, exit_node_ids, custom_rules, enabled) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *",
+         (user_id, name, sub_token, upstream_url, bridge_node_names, exit_node_ids, \
+          fetch_via_exit_node_id, custom_rules, enabled) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *",
     )
     .bind(user_id)
     .bind(name)
@@ -68,6 +70,7 @@ pub async fn create(
     .bind(upstream_url)
     .bind(SqlxJson(bridge_node_names.to_vec()))
     .bind(SqlxJson(exit_node_ids.to_vec()))
+    .bind(fetch_via_exit_node_id)
     .bind(custom_rules)
     .bind(enabled)
     .fetch_one(db)
@@ -83,19 +86,21 @@ pub async fn update(
     upstream_url: &str,
     bridge_node_names: &[String],
     exit_node_ids: &[Uuid],
+    fetch_via_exit_node_id: Option<Uuid>,
     custom_rules: Option<&str>,
     enabled: bool,
 ) -> AppResult<Option<OutputProfile>> {
     let row = sqlx::query_as::<_, OutputProfile>(
         "UPDATE output_profiles SET \
             name=$1, upstream_url=$2, bridge_node_names=$3, exit_node_ids=$4, \
-            custom_rules=$5, enabled=$6, updated_at=NOW() \
-         WHERE user_id=$7 AND id=$8 RETURNING *",
+            fetch_via_exit_node_id=$5, custom_rules=$6, enabled=$7, updated_at=NOW() \
+         WHERE user_id=$8 AND id=$9 RETURNING *",
     )
     .bind(name)
     .bind(upstream_url)
     .bind(SqlxJson(bridge_node_names.to_vec()))
     .bind(SqlxJson(exit_node_ids.to_vec()))
+    .bind(fetch_via_exit_node_id)
     .bind(custom_rules)
     .bind(enabled)
     .bind(user_id)

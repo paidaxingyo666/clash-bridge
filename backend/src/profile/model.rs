@@ -21,6 +21,10 @@ pub struct OutputProfile {
     pub bridge_node_names: SqlxJson<Vec<String>>,
     pub exit_node_ids: SqlxJson<Vec<Uuid>>,
 
+    /// 拉取上游订阅时, 经此 exit_node (必须是 socks5 / http 类型) 出去.
+    /// 用于绕过上游对数据中心 IP 的封禁. NULL = 直连.
+    pub fetch_via_exit_node_id: Option<Uuid>,
+
     pub custom_rules: Option<String>,
     pub enabled: bool,
 
@@ -49,6 +53,7 @@ pub struct OutputProfileView {
 
     pub bridge_node_names: Vec<String>,
     pub exit_node_ids: Vec<Uuid>,
+    pub fetch_via_exit_node_id: Option<Uuid>,
 
     pub custom_rules: Option<String>,
     pub enabled: bool,
@@ -75,6 +80,7 @@ impl From<&OutputProfile> for OutputProfileView {
             last_upstream_fetch_error: p.last_upstream_fetch_error.clone(),
             bridge_node_names: p.bridge_node_names.0.clone(),
             exit_node_ids: p.exit_node_ids.0.clone(),
+            fetch_via_exit_node_id: p.fetch_via_exit_node_id,
             custom_rules: p.custom_rules.clone(),
             enabled: p.enabled,
             cached_upstream_count: p.cached_upstream_count,
@@ -94,6 +100,8 @@ pub struct ProfileInput {
     pub upstream_url: String,
     pub bridge_node_names: Vec<String>,
     pub exit_node_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub fetch_via_exit_node_id: Option<Uuid>,
     pub custom_rules: Option<String>,
     pub enabled: Option<bool>,
 }

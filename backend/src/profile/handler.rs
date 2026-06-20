@@ -44,6 +44,7 @@ pub async fn create(
         input.upstream_url.trim(),
         &input.bridge_node_names,
         &input.exit_node_ids,
+        input.fetch_via_exit_node_id,
         input.custom_rules.as_deref(),
         input.enabled.unwrap_or(true),
     )
@@ -66,6 +67,7 @@ pub async fn update(
         input.upstream_url.trim(),
         &input.bridge_node_names,
         &input.exit_node_ids,
+        input.fetch_via_exit_node_id,
         input.custom_rules.as_deref(),
         input.enabled.unwrap_or(true),
     )
