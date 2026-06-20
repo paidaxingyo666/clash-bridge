@@ -15,12 +15,17 @@ deploy/secrets.local.env
 deploy/*secrets*.env
 deploy/*-secrets*.env
 
+# 机场订阅源 (含真实节点密钥, 不入库)
+flower-lcq.yaml
+*.lcq.yaml
+
 # 日志
 logs/
 *.log
 
 # 编辑器 / 系统垃圾
 .DS_Store
+._*
 .idea/
 .vscode/
 *.swp
