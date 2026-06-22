@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::error::{AppError, AppResult};
 use crate::exit_node::repo as exit_repo;
-use crate::generator::render::{pick_renderer, is_known_unimplemented_format, RenderedSub};
+use crate::generator::render::{pick_renderer, RenderedSub};
 use crate::generator::yaml::{build_model, GenerateInput};
 use crate::profile::model::OutputProfile;
 use crate::profile::repo as profile_repo;
@@ -52,7 +52,7 @@ async fn collect_inputs<'a>(
 /// 流程: build_model (含 custom_rules) → pick_renderer → 若 has_relay_chain 且渲染器不支持 relay
 /// 则返回 415 → render。
 /// - 未知格式 → 404 (NotFound)。
-/// - 已知但本批未实现 (sub.txt/surge.conf/quanx.conf) → 明确"暂未实现, 批2 支持"提示 (BadRequest)。
+/// - 可用格式: clash.yaml / singbox.json / sub.txt / surge.conf / quanx.conf。
 pub async fn build_for_profile_fmt(
     db: &PgPool,
     user_id: Uuid,
@@ -61,14 +61,7 @@ pub async fn build_for_profile_fmt(
 ) -> AppResult<BuildResult> {
     let renderer = match pick_renderer(format) {
         Some(r) => r,
-        None => {
-            if is_known_unimplemented_format(format) {
-                return Err(AppError::BadRequest(format!(
-                    "{format} 格式暂未实现, 将在批2 支持。当前可用: clash.yaml / singbox.json"
-                )));
-            }
-            return Err(AppError::NotFound);
-        }
+        None => return Err(AppError::NotFound),
     };
 
     let (upstream_yaml, selected_exits) = collect_inputs(db, user_id, profile).await?;

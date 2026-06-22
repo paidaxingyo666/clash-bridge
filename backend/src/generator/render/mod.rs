@@ -2,11 +2,19 @@
 //!
 //! - [`ClashRenderer`](clash::ClashRenderer): 字节等价路径, clone upstream_root 后原地注入。
 //! - [`SingboxRenderer`](singbox::SingboxRenderer): 从 InjectModel 从零构造 sing-box JSON。
+//! - [`Base64Renderer`](base64::Base64Renderer): 上游裸节点 → URI 列表整体 base64。
+//! - [`SurgeRenderer`](surge::SurgeRenderer): Surge `.conf` ini。
+//! - [`QuanXRenderer`](quanx::QuanXRenderer): Quantumult X `.conf`。
 //!
-//! base64 / surge / quanx 这批 (批1 MVP) 不实现, 由 service 层返回"暂未实现"提示。
+//! Clash / sing-box 支持固定出口链路 (relay); base64 / surge / quanx 不支持
+//! (`supports_relay_chain()=false`), 含链路 profile 由 service 层返回 415。
 
+pub mod base64;
 pub mod clash;
+pub mod quanx;
 pub mod singbox;
+pub mod surge;
+pub mod uri_encode;
 
 use crate::error::AppResult;
 use crate::generator::model::InjectModel;
@@ -36,17 +44,15 @@ pub trait Renderer: Send + Sync {
 }
 
 /// 按 URL 末段 format 选择渲染器。
-/// 已实现: `clash.yaml` / `singbox.json`。
-/// 未实现 (批2): `sub.txt` / `surge.conf` / `quanx.conf` → 返回 None, 由调用方区分处理。
+/// 已实现: `clash.yaml` / `singbox.json` / `sub.txt` / `surge.conf` / `quanx.conf`。
+/// 未知格式返回 None (调用方 404)。
 pub fn pick_renderer(format: &str) -> Option<Box<dyn Renderer>> {
     match format {
         "clash.yaml" => Some(Box::new(clash::ClashRenderer)),
         "singbox.json" => Some(Box::new(singbox::SingboxRenderer)),
+        "sub.txt" => Some(Box::new(base64::Base64Renderer)),
+        "surge.conf" => Some(Box::new(surge::SurgeRenderer)),
+        "quanx.conf" => Some(Box::new(quanx::QuanXRenderer)),
         _ => None,
     }
-}
-
-/// 已知但本批未实现的格式 (用于给出"批2 再支持"的明确提示, 区别于未知格式 404)。
-pub fn is_known_unimplemented_format(format: &str) -> bool {
-    matches!(format, "sub.txt" | "surge.conf" | "quanx.conf")
 }

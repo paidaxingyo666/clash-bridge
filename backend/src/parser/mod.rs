@@ -10,7 +10,7 @@
 
 mod base64sub;
 mod sip008;
-mod uri;
+pub(crate) mod uri;
 
 use serde::Deserialize;
 use serde_yaml::{Mapping, Value};

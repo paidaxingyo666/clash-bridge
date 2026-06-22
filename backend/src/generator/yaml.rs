@@ -765,4 +765,79 @@ rules:
         assert!(route_rules.iter().any(|r| r["domain_suffix"] == serde_json::json!(["custom.com"])
             && r["outbound"] == serde_json::json!("DIRECT")));
     }
+
+    /// 含链路 profile (has_relay_chain=true) 对 base64/surge/quanx 触发 415 决策条件
+    /// (service.rs 用 `has_relay_chain && !supports_relay_chain` 拦截); clash/singbox 不拦截。
+    #[test]
+    fn relay_chain_415_decision_matches_renderer_capability() {
+        use crate::generator::render::pick_renderer;
+
+        let bridges = vec!["SG01".to_string()];
+        let model = build_model(GenerateInput {
+            upstream_yaml: SAMPLE_UPSTREAM,
+            selected_bridge_names: &bridges,
+            exit_node_yamls: vec![EXIT_VMESS],
+            custom_rules: None,
+        })
+        .unwrap();
+        assert!(model.has_relay_chain);
+
+        // 支持 relay → 不触发 415。
+        for fmt in ["clash.yaml", "singbox.json"] {
+            let r = pick_renderer(fmt).unwrap();
+            assert!(r.supports_relay_chain(), "{fmt} 应支持 relay");
+            assert!(!(model.has_relay_chain && !r.supports_relay_chain()), "{fmt} 不应触发 415");
+        }
+        // 不支持 relay → 触发 415。
+        for fmt in ["sub.txt", "surge.conf", "quanx.conf"] {
+            let r = pick_renderer(fmt).unwrap();
+            assert!(!r.supports_relay_chain(), "{fmt} 不应支持 relay");
+            assert!(model.has_relay_chain && !r.supports_relay_chain(), "{fmt} 应触发 415");
+        }
+        // 未知格式 → None (service 转 404)。
+        assert!(pick_renderer("foo.bar").is_none());
+    }
+
+    /// 无链路 profile (exit_node_yamls 为空时无法构建; 用 build_model 不含 bridge 的方式不可行,
+    /// 故构造一个 has_relay_chain=false 的 InjectModel 直接喂三个新 renderer, 验证正常渲染不 415)。
+    #[test]
+    fn no_chain_profile_renders_all_new_formats() {
+        use crate::generator::model::{GroupKind, InjectGroup, InjectModel};
+        use crate::generator::render::pick_renderer;
+
+        let upstream = r#"proxies:
+  - name: SS1
+    type: ss
+    server: 1.2.3.4
+    port: 8388
+    cipher: aes-256-gcm
+    password: pw
+"#;
+        let root: Value = serde_yaml::from_str(upstream).unwrap();
+        let model = InjectModel {
+            upstream_root: root,
+            injected_proxies: Vec::new(),
+            injected_groups: vec![InjectGroup {
+                name: "Bridge-Exit".into(),
+                kind: GroupKind::Select,
+                proxies: vec!["SS1".into(), "DIRECT".into()],
+            }],
+            select_inject_target: "Bridge-Exit".into(),
+            custom_rules: Vec::new(),
+            fallback_target: "Bridge-Exit".into(),
+            upstream_count: 1,
+            bridge_count: 0,
+            chain_count: 0,
+            missing_bridges: Vec::new(),
+            has_relay_chain: false,
+        };
+
+        for fmt in ["sub.txt", "surge.conf", "quanx.conf"] {
+            let r = pick_renderer(fmt).unwrap();
+            // 无链路 → 不触发 415。
+            assert!(!(model.has_relay_chain && !r.supports_relay_chain()));
+            let rendered = r.render(&model).unwrap();
+            assert!(!rendered.body.is_empty(), "{fmt} 渲染应非空");
+        }
+    }
 }

@@ -81,6 +81,12 @@ fn dedup_name(m: &mut Mapping, seen: &mut std::collections::HashSet<String>) {
     m.insert(key, Value::String(name));
 }
 
+/// 解析单个 URI 行 → proxy Mapping (公开包装, 供 render 层逆向序列化往返测试 / 复用)。
+/// 识别失败 (含不支持的 scheme) 返回 None。
+pub fn parse_line_pub(uri: &str) -> Option<Mapping> {
+    parse_one(uri.trim())
+}
+
 /// 解析单个 URI。识别失败 (含不支持的 scheme) 返回 None。
 fn parse_one(uri: &str) -> Option<Mapping> {
     let lower = uri.to_ascii_lowercase();
@@ -198,6 +204,28 @@ fn apply_transport(m: &mut Mapping, network: &str, q: &std::collections::HashMap
                 .unwrap_or("");
             ins_str(&mut grpc, "grpc-service-name", svc);
             m.insert(Value::String("grpc-opts".into()), Value::Mapping(grpc));
+        }
+        "h2" | "http" => {
+            // h2/http transport → h2-opts: { path, host:[...] }。镜像 parse_vmess 的 h2 处理:
+            // path 为字符串; host 按逗号 split 成 sequence。
+            let mut h2 = Mapping::new();
+            if let Some(host) = q.get("host").filter(|h| !h.is_empty()) {
+                let hosts: Vec<Value> = host
+                    .split(',')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| Value::String(s.to_string()))
+                    .collect();
+                if !hosts.is_empty() {
+                    h2.insert(Value::String("host".into()), Value::Sequence(hosts));
+                }
+            }
+            if let Some(path) = q.get("path").filter(|p| !p.is_empty()) {
+                ins_str(&mut h2, "path", path.clone());
+            }
+            if !h2.is_empty() {
+                m.insert(Value::String("h2-opts".into()), Value::Mapping(h2));
+            }
         }
         _ => {}
     }
@@ -1052,6 +1080,56 @@ mod tests {
         assert_eq!(s(ws, "path"), Some("/ws"));
         let headers = nested(ws, "headers").unwrap();
         assert_eq!(s(headers, "Host"), Some("h.com"));
+    }
+
+    #[test]
+    fn vless_h2_parses_h2_opts() {
+        // h2 transport: 正向解析应构造 h2-opts { path, host:[...] }。
+        let uri = "vless://b831381d-6324-4d53-ad4f-8cda48b30811@h.com:443?encryption=none&security=tls&type=h2&host=a.com,b.com&path=%2Fh2&sni=h.com#vl-h2";
+        let m = parse_vless(uri).unwrap();
+        assert_eq!(s(&m, "network"), Some("h2"));
+        let h2 = nested(&m, "h2-opts").unwrap();
+        assert_eq!(s(h2, "path"), Some("/h2"));
+        let hosts = h2
+            .get(Value::String("host".into()))
+            .and_then(|v| v.as_sequence())
+            .unwrap();
+        assert_eq!(hosts.len(), 2);
+        assert_eq!(hosts[0].as_str(), Some("a.com"));
+        assert_eq!(hosts[1].as_str(), Some("b.com"));
+    }
+
+    #[test]
+    fn vless_h2_roundtrip_preserves_path_host() {
+        // URI → mapping → URI → mapping: h2 的 path / host 应在往返后保留。
+        use crate::generator::render::uri_encode::proxy_to_uri;
+        let uri = "vless://b831381d-6324-4d53-ad4f-8cda48b30811@h.com:443?encryption=none&security=tls&type=h2&host=a.com&path=%2Fh2&sni=h.com#vl-h2";
+        let m1 = parse_vless(uri).unwrap();
+        let back = proxy_to_uri(&m1).unwrap();
+        let m2 = parse_vless(&back).unwrap();
+        assert_eq!(s(&m2, "network"), Some("h2"));
+        let h2 = nested(&m2, "h2-opts").unwrap();
+        assert_eq!(s(h2, "path"), Some("/h2"));
+        let hosts = h2
+            .get(Value::String("host".into()))
+            .and_then(|v| v.as_sequence())
+            .unwrap();
+        assert_eq!(hosts[0].as_str(), Some("a.com"));
+    }
+
+    #[test]
+    fn trojan_h2_parses_h2_opts() {
+        // trojan h2 transport 同样应构造 h2-opts。
+        let uri = "trojan://pw@h.com:443?sni=h.com&type=h2&host=c.com&path=%2Ft#tj-h2";
+        let m = parse_trojan(uri).unwrap();
+        assert_eq!(s(&m, "network"), Some("h2"));
+        let h2 = nested(&m, "h2-opts").unwrap();
+        assert_eq!(s(h2, "path"), Some("/t"));
+        let hosts = h2
+            .get(Value::String("host".into()))
+            .and_then(|v| v.as_sequence())
+            .unwrap();
+        assert_eq!(hosts[0].as_str(), Some("c.com"));
     }
 
     // ---- trojan ----
