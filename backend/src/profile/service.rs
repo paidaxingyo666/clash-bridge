@@ -39,7 +39,7 @@ pub async fn refresh_upstream_by_profile(
             Ok(c) => Some(c),
             Err(e) => {
                 let msg = format!("exit_node 代理不可用: {e}");
-                repo::save_upstream_fetch(db, profile.id, None, "error", Some(&msg), Utc::now())
+                repo::save_upstream_fetch(db, profile.id, None, "error", Some(&msg), Utc::now(), None)
                     .await?;
                 return Err(e);
             }
@@ -50,6 +50,20 @@ pub async fn refresh_upstream_by_profile(
     match client.get(&profile.upstream_url).send().await {
         Ok(resp) => {
             let status = resp.status();
+            // 借用顺序: 先从 resp.headers() (只读借用) 抽出 owned String, 之后才把 resp move 给
+            // read_body_limited (消费 resp). 必须在 move 之前抽, 否则借用已失效.
+            // subscription-userinfo = 上游真实流量配额; profile-update-interval 顺带抽 (当前未单独存,
+            // 但抽出确保 resp 还在时一次性拿全, 不残留借用问题).
+            let upstream_userinfo: Option<String> = resp
+                .headers()
+                .get("subscription-userinfo")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            let _upstream_update_interval: Option<String> = resp
+                .headers()
+                .get("profile-update-interval")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
             // body 大小上限 (第一保险): Content-Length 已超过即拒, 不读 body.
             if let Some(len) = resp.content_length() {
                 if len > MAX_UPSTREAM_BODY_BYTES {
@@ -57,7 +71,7 @@ pub async fn refresh_upstream_by_profile(
                         "上游响应体过大 ({} 字节 > {} 字节上限), 拒绝处理",
                         len, MAX_UPSTREAM_BODY_BYTES
                     );
-                    repo::save_upstream_fetch(db, profile.id, None, "error", Some(&err), Utc::now())
+                    repo::save_upstream_fetch(db, profile.id, None, "error", Some(&err), Utc::now(), None)
                         .await?;
                     return Err(AppError::Upstream(err));
                 }
@@ -68,20 +82,20 @@ pub async fn refresh_upstream_by_profile(
                 Ok(t) => t,
                 Err(e) => {
                     let err = e.to_string();
-                    repo::save_upstream_fetch(db, profile.id, None, "error", Some(&err), Utc::now())
+                    repo::save_upstream_fetch(db, profile.id, None, "error", Some(&err), Utc::now(), None)
                         .await?;
                     return Err(e);
                 }
             };
             if !status.is_success() {
                 let err = format_http_error(status.as_u16(), &text);
-                repo::save_upstream_fetch(db, profile.id, None, "error", Some(&err), Utc::now())
+                repo::save_upstream_fetch(db, profile.id, None, "error", Some(&err), Utc::now(), None)
                     .await?;
                 return Err(AppError::Upstream(err));
             }
             if text.trim().is_empty() {
                 let err = "upstream returned empty body".to_string();
-                repo::save_upstream_fetch(db, profile.id, None, "error", Some(&err), Utc::now())
+                repo::save_upstream_fetch(db, profile.id, None, "error", Some(&err), Utc::now(), None)
                     .await?;
                 return Err(AppError::Upstream(err));
             }
@@ -93,16 +107,27 @@ pub async fn refresh_upstream_by_profile(
                 Ok((yaml, _count)) => yaml,
                 Err(e) => {
                     // 归一化失败: 不覆盖旧缓存 (yaml=None → COALESCE 保留), 仅落 error 状态.
+                    // userinfo 也传 None 保留旧值 (这次没拉成功的有效订阅, 不应覆盖流量配额).
                     let err = format!("订阅格式解析失败: {e}");
-                    repo::save_upstream_fetch(db, profile.id, None, "error", Some(&err), Utc::now())
+                    repo::save_upstream_fetch(db, profile.id, None, "error", Some(&err), Utc::now(), None)
                         .await?;
                     return Err(AppError::BadRequest(err));
                 }
             };
 
-            // 写 profile 的 last_upstream_yaml (归一化后的 Clash YAML)
-            repo::save_upstream_fetch(db, profile.id, Some(&clash_yaml), "success", None, Utc::now())
-                .await?;
+            // 写 profile 的 last_upstream_yaml (归一化后的 Clash YAML).
+            // 成功路径才透传上游 subscription-userinfo: 抽到值则传 Some(值), 上游没给则传 Some("")
+            // 显式清空 (避免节点已换源仍展示旧机场的过期配额). 用 as_deref 把 Option<String> 借成 Option<&str>.
+            repo::save_upstream_fetch(
+                db,
+                profile.id,
+                Some(&clash_yaml),
+                "success",
+                None,
+                Utc::now(),
+                Some(upstream_userinfo.as_deref().unwrap_or("")),
+            )
+            .await?;
             // dedup 写历史 (基于归一化后的内容 hash)
             let hash = history_repo::hash_yaml(&clash_yaml);
             let prev = history_repo::latest_hash(db, profile.id).await?;
@@ -114,7 +139,7 @@ pub async fn refresh_upstream_by_profile(
         }
         Err(e) => {
             let msg = e.to_string();
-            repo::save_upstream_fetch(db, profile.id, None, "error", Some(&msg), Utc::now())
+            repo::save_upstream_fetch(db, profile.id, None, "error", Some(&msg), Utc::now(), None)
                 .await?;
             Err(AppError::Upstream(msg))
         }

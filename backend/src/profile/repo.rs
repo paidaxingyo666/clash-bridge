@@ -148,6 +148,8 @@ pub async fn save_upstream_fetch(
     status: &str,
     error: Option<&str>,
     fetched_at: DateTime<Utc>,
+    // 上游 subscription-userinfo 头原文. 成功传 Some(抽到的值或空串), 失败传 None 保留旧值 (COALESCE).
+    userinfo: Option<&str>,
 ) -> AppResult<()> {
     sqlx::query(
         "UPDATE output_profiles SET \
@@ -155,13 +157,15 @@ pub async fn save_upstream_fetch(
             last_upstream_fetched_at = $2, \
             last_upstream_fetch_status = $3, \
             last_upstream_fetch_error = $4, \
+            last_upstream_userinfo = COALESCE($5, last_upstream_userinfo), \
             updated_at = NOW() \
-         WHERE id = $5",
+         WHERE id = $6",
     )
     .bind(yaml)
     .bind(fetched_at)
     .bind(status)
     .bind(error)
+    .bind(userinfo)
     .bind(id)
     .execute(db)
     .await?;

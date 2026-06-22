@@ -84,35 +84,53 @@ pub async fn public_subscription(
         }
     }
 
-    // 2. 重新读 profile (last_upstream_yaml / 时间可能刚被刷新), 然后实时生成
+    // 2. 重新读 profile (last_upstream_yaml / userinfo / 时间可能刚被刷新), 然后实时生成.
+    //    重读拿到最新的 last_upstream_userinfo, 透传给客户端做流量条.
     let user_id = profile.user_id;
     let profile_id = profile.id;
+    let refreshed = profile_repo::find_by_token(&s.db, &token).await?;
+    let upstream_userinfo = refreshed
+        .as_ref()
+        .and_then(|p| p.last_upstream_userinfo.clone())
+        .or_else(|| profile.last_upstream_userinfo.clone());
     match gen_service::build_and_cache(&s.db, user_id, profile_id).await {
-        Ok(out) => Ok(yaml_response(&profile.name, out.yaml)),
+        Ok(out) => Ok(yaml_response(&profile.name, out.yaml, upstream_userinfo.as_deref())),
         Err(e) => {
             warn!(error = ?e, "/sub: live generate failed, fallback to cached_yaml");
-            // 重新读最新的 cached_yaml (因为 build_and_cache 可能没机会写, 用之前的)
-            let refreshed = profile_repo::find_by_token(&s.db, &token).await?;
+            // 复用上面重读的 refreshed 取 cached_yaml (build_and_cache 失败时没机会写, 用之前缓存的)
             let cached = refreshed
                 .and_then(|p| p.cached_yaml)
                 .ok_or_else(|| AppError::BadRequest(format!(
                     "无法实时生成订阅且无缓存可用: {e}"
                 )))?;
-            Ok(yaml_response(&profile.name, cached))
+            Ok(yaml_response(&profile.name, cached, upstream_userinfo.as_deref()))
         }
     }
 }
 
-fn yaml_response(profile_name: &str, body: String) -> axum::response::Response {
+/// 计算回给客户端的 `subscription-userinfo` 头值: 优先透传上游真实配额, 空/None 才回退默认 0 骨架.
+/// 抽成纯函数便于单测.
+fn subscription_userinfo_header(upstream: Option<&str>) -> String {
+    match upstream {
+        Some(u) if !u.trim().is_empty() => u.to_string(),
+        // mihomo / Clash Verge 通过这个 header 显示流量配额; 无上游数据时给空头骨架.
+        _ => "upload=0; download=0; total=0; expire=0".to_string(),
+    }
+}
+
+fn yaml_response(
+    profile_name: &str,
+    body: String,
+    upstream_userinfo: Option<&str>,
+) -> axum::response::Response {
     (
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, "application/yaml; charset=utf-8".to_string()),
             (header::CONTENT_DISPOSITION, build_content_disposition(profile_name)),
-            // mihomo / Clash Verge 通过这个 header 显示流量配额；我们没有真实数据，给一个空头骨架
             (
                 header::HeaderName::from_static("subscription-userinfo"),
-                "upload=0; download=0; total=0; expire=0".to_string(),
+                subscription_userinfo_header(upstream_userinfo),
             ),
         ],
         body,
@@ -161,4 +179,34 @@ fn percent_encode_utf8(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DEFAULT_SKELETON: &str = "upload=0; download=0; total=0; expire=0";
+
+    #[test]
+    fn userinfo_passthrough_when_upstream_present() {
+        // 有上游 userinfo → 原样透传 (真实流量配额)
+        let upstream = "upload=123; download=456; total=1000000; expire=1700000000";
+        assert_eq!(
+            subscription_userinfo_header(Some(upstream)),
+            upstream
+        );
+    }
+
+    #[test]
+    fn userinfo_fallback_when_none() {
+        // None → 回退默认 0 骨架
+        assert_eq!(subscription_userinfo_header(None), DEFAULT_SKELETON);
+    }
+
+    #[test]
+    fn userinfo_fallback_when_empty_or_blank() {
+        // 空串 / 纯空白 → 回退默认 0 骨架
+        assert_eq!(subscription_userinfo_header(Some("")), DEFAULT_SKELETON);
+        assert_eq!(subscription_userinfo_header(Some("   ")), DEFAULT_SKELETON);
+    }
 }

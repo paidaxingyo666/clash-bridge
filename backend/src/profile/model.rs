@@ -19,6 +19,10 @@ pub struct OutputProfile {
     pub last_upstream_fetched_at: Option<DateTime<Utc>>,
     pub last_upstream_fetch_status: Option<String>,
     pub last_upstream_fetch_error: Option<String>,
+    /// 上游订阅响应头里的 `subscription-userinfo` 原文 (真实流量配额, 形如
+    /// `upload=...; download=...; total=...; expire=...`). 拉取成功时透传存这里,
+    /// 失败保留旧值. /sub 响应优先用它, 空/NULL 才回退默认 0 骨架. 前端不展示, 故 View 不含此字段.
+    pub last_upstream_userinfo: Option<String>,
 
     pub bridge_node_names: SqlxJson<Vec<String>>,
     pub exit_node_ids: SqlxJson<Vec<Uuid>>,

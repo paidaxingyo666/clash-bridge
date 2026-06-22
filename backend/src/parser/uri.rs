@@ -14,11 +14,13 @@ use super::base64sub::decode_b64_flex;
 /// 已知 scheme 前缀。
 const KNOWN_SCHEMES: &[&str] = &[
     "ss://",
+    "ssr://",
     "vmess://",
     "vless://",
     "trojan://",
     "hysteria2://",
     "hy2://",
+    "tuic://",
 ];
 
 /// 判断单行是否以已知 scheme 开头 (大小写不敏感)。
@@ -82,7 +84,10 @@ fn dedup_name(m: &mut Mapping, seen: &mut std::collections::HashSet<String>) {
 /// 解析单个 URI。识别失败 (含不支持的 scheme) 返回 None。
 fn parse_one(uri: &str) -> Option<Mapping> {
     let lower = uri.to_ascii_lowercase();
-    if lower.starts_with("ss://") {
+    // ssr:// 必须在 ss:// 之前判 (虽然 "ssr://".starts_with("ss://") 为 false, 保持显式更稳)
+    if lower.starts_with("ssr://") {
+        parse_ssr(uri)
+    } else if lower.starts_with("ss://") {
         parse_ss(uri)
     } else if lower.starts_with("vmess://") {
         parse_vmess(uri)
@@ -92,6 +97,8 @@ fn parse_one(uri: &str) -> Option<Mapping> {
         parse_trojan(uri)
     } else if lower.starts_with("hysteria2://") || lower.starts_with("hy2://") {
         parse_hysteria2(uri)
+    } else if lower.starts_with("tuic://") {
+        parse_tuic(uri)
     } else {
         None
     }
@@ -304,6 +311,194 @@ fn apply_ss_plugin(m: &mut Mapping, plugin_raw: &str) {
     if !opts.is_empty() {
         m.insert(Value::String("plugin-opts".into()), Value::Mapping(opts));
     }
+}
+
+// ---------- ssr ----------
+
+/// 解析 `ssr://` + 整体 URL-safe base64 (双层 base64)。
+///
+/// 外层解码后形如:
+/// `host:port:protocol:method:obfs:base64url(password)/?obfsparam=..&protoparam=..&remarks=..&group=..`
+/// 左半 (`/?` 之前) 按 `:` 切 6 段; 右半是 query, 其中 obfsparam/protoparam/remarks 的值也是 base64url。
+/// password 段同样是 base64url, 故内层共有 4 处需再解一次 base64。
+fn parse_ssr(uri: &str) -> Option<Mapping> {
+    let rest = &uri[6..]; // 去掉 "ssr://"
+    // 外层: 整体 URL-safe base64 (无 padding), 复用 decode_b64_flex 容错
+    let decoded = decode_b64_flex(rest.trim())?;
+
+    // 按第一个 "/?" 切左右; 兼容只有 "?" 或省略 "/" 的情况
+    let (left, query) = if let Some(idx) = decoded.find("/?") {
+        (&decoded[..idx], Some(&decoded[idx + 2..]))
+    } else if let Some(idx) = decoded.find('?') {
+        (&decoded[..idx], Some(&decoded[idx + 1..]))
+    } else {
+        // 去掉可能的尾部 '/'
+        (decoded.trim_end_matches('/'), None)
+    };
+
+    // 左半按 ':' 切 6 段: host : port : protocol : method : obfs : base64url(password)
+    // host 可能是 IPv6 (无方括号), 但 SSR 规范里 IPv6 也是裸 ':' 分隔的固定 6 段,
+    // 故从右往左切 5 次, 剩下的全归 host。
+    let parts: Vec<&str> = left.rsplitn(6, ':').collect();
+    if parts.len() != 6 {
+        return None;
+    }
+    // rsplitn 返回逆序: [password_b64, obfs, method, protocol, port, host]
+    let password_b64 = parts[0];
+    let obfs = parts[1];
+    let method = parts[2];
+    let protocol = parts[3];
+    let port_str = parts[4];
+    let host = parts[5];
+
+    let port: i64 = port_str.trim().parse().ok()?;
+    if host.is_empty() || !(1..=65535).contains(&port) {
+        return None;
+    }
+    // 与 validate_proxy_yaml 的 SSR 必填项对齐: cipher(method)/protocol/obfs 三者非空,
+    // 否则是畸形节点(空 obfs/protocol 不在白名单), mihomo 静默连不上。归 None → 计入 failed → 走整体保护。
+    if method.trim().is_empty() || protocol.trim().is_empty() || obfs.trim().is_empty() {
+        return None;
+    }
+
+    // 内层: password 是 base64url, 再解一次
+    let password = decode_b64_flex(password_b64.trim())?;
+    // SSR password 空 = 畸形节点, 拒绝 (与 vmess 拒空 id / trojan 拒空 password 一致)。
+    if password.trim().is_empty() {
+        return None;
+    }
+
+    // query 里 obfsparam / protoparam / remarks 的值也是 base64url, 各自再解码
+    let qmap = query.map(parse_query_str_raw).unwrap_or_default();
+    let obfsparam = qmap
+        .get("obfsparam")
+        .and_then(|v| decode_b64_flex(v))
+        .unwrap_or_default();
+    let protoparam = qmap
+        .get("protoparam")
+        .and_then(|v| decode_b64_flex(v))
+        .unwrap_or_default();
+    let remarks = qmap
+        .get("remarks")
+        .and_then(|v| decode_b64_flex(v))
+        .unwrap_or_default();
+
+    let name = if remarks.trim().is_empty() {
+        format!("{host}:{port}")
+    } else {
+        remarks.trim().to_string()
+    };
+
+    let mut m = Mapping::new();
+    ins_str(&mut m, "name", name);
+    ins_str(&mut m, "type", "ssr");
+    ins_str(&mut m, "server", host);
+    ins(&mut m, "port", Value::Number(port.into()));
+    ins_str(&mut m, "cipher", method);
+    ins_str(&mut m, "password", password);
+    ins_str(&mut m, "protocol", protocol);
+    if !protoparam.is_empty() {
+        ins_str(&mut m, "protocol-param", protoparam);
+    }
+    ins_str(&mut m, "obfs", obfs);
+    if !obfsparam.is_empty() {
+        ins_str(&mut m, "obfs-param", obfsparam);
+    }
+    ins(&mut m, "udp", Value::Bool(true));
+
+    Some(m)
+}
+
+/// 解析 SSR query 串 (无前导 '?'), value **不** percent-decode (SSR 的 param 是 base64url, 交给调用方再解)。
+fn parse_query_str_raw(q: &str) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    for pair in q.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        if let Some((k, v)) = pair.split_once('=') {
+            map.insert(k.to_string(), v.to_string());
+        } else {
+            map.insert(pair.to_string(), String::new());
+        }
+    }
+    map
+}
+
+// ---------- tuic ----------
+
+/// 解析 `tuic://uuid:password@host:port?params#name` (主做 v5)。
+///
+/// userinfo 含 ':' → `uuid:password` (都 percent-decode); 不含 ':' → v4 token 形态, 映射 `token`。
+/// query 用下划线 (congestion_control / udp_relay_mode), Clash YAML 用连字符。
+fn parse_tuic(uri: &str) -> Option<Mapping> {
+    let u = Url::parse(uri).ok()?;
+    let host = u.host_str()?.trim_matches(['[', ']']).to_string();
+    let port = u.port()? as i64;
+    if host.is_empty() || !(1..=65535).contains(&port) {
+        return None;
+    }
+    let q = collect_query(&u);
+
+    let mut m = Mapping::new();
+    ins_str(&mut m, "name", name_from_fragment(u.fragment(), &host, port));
+    ins_str(&mut m, "type", "tuic");
+    ins_str(&mut m, "server", &host);
+    ins(&mut m, "port", Value::Number(port.into()));
+
+    // userinfo: url crate 已把 username/password 拆好。
+    // v5: uuid:password (有 password 段); v4: 只有 username = token。
+    let username = pct_decode(u.username());
+    match u.password() {
+        Some(pw) => {
+            // v5: uuid + password (都 percent-decode)
+            ins_str(&mut m, "uuid", username);
+            ins_str(&mut m, "password", pct_decode(pw));
+        }
+        None => {
+            // v4 token 形态: 映射 token; 空 username = 既无 uuid 又无 token 的废节点, 拒绝
+            if username.trim().is_empty() {
+                return None;
+            }
+            ins_str(&mut m, "token", username);
+        }
+    }
+
+    if let Some(sni) = q.get("sni").filter(|s| !s.is_empty()) {
+        ins_str(&mut m, "sni", sni.clone());
+    }
+    if let Some(alpn) = q.get("alpn").filter(|s| !s.is_empty()) {
+        let arr: Vec<Value> = alpn
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| Value::String(s.to_string()))
+            .collect();
+        if !arr.is_empty() {
+            m.insert(Value::String("alpn".into()), Value::Sequence(arr));
+        }
+    }
+    if let Some(cc) = q.get("congestion_control").filter(|s| !s.is_empty()) {
+        ins_str(&mut m, "congestion-controller", cc.clone());
+    }
+    if let Some(urm) = q.get("udp_relay_mode").filter(|s| !s.is_empty()) {
+        ins_str(&mut m, "udp-relay-mode", urm.clone());
+    }
+    if let Some(disable_sni) = q.get("disable_sni") {
+        let b = disable_sni == "1" || disable_sni.eq_ignore_ascii_case("true");
+        ins(&mut m, "disable-sni", Value::Bool(b));
+    }
+    if let Some(allow_insecure) = q.get("allow_insecure") {
+        let b = allow_insecure == "1" || allow_insecure.eq_ignore_ascii_case("true");
+        ins(&mut m, "skip-cert-verify", Value::Bool(b));
+    }
+    if let Some(reduce_rtt) = q.get("reduce_rtt") {
+        let b = reduce_rtt == "1" || reduce_rtt.eq_ignore_ascii_case("true");
+        ins(&mut m, "reduce-rtt", Value::Bool(b));
+    }
+    ins(&mut m, "udp", Value::Bool(true));
+
+    Some(m)
 }
 
 // ---------- vmess ----------
@@ -900,13 +1095,72 @@ mod tests {
         assert_eq!(s(&m, "password"), Some("pw"));
     }
 
+    // ---- ssr ----
+    #[test]
+    fn ssr_double_base64_full() {
+        // 外层 ssr:// + 整体 url-safe base64; 内层 password / obfsparam / protoparam / remarks 各自再 base64url。
+        // method=aes-256-cfb obfs=plain protocol=origin 均在 validate 白名单内。
+        let uri = "ssr://MS4yLjMuNDo4Mzg4Om9yaWdpbjphZXMtMjU2LWNmYjpwbGFpbjpiWGx3WVhOek1USXovP29iZnNwYXJhbT1iMkptYzJodmMzUXVZMjl0JnByb3RvcGFyYW09Y0hKdmRHOTJZV3cmcmVtYXJrcz1VMU5TSUU1dlpHVQ";
+        let m = parse_ssr(uri).unwrap();
+        assert_eq!(s(&m, "type"), Some("ssr"));
+        assert_eq!(s(&m, "server"), Some("1.2.3.4"));
+        assert_eq!(i(&m, "port"), Some(8388));
+        assert_eq!(s(&m, "cipher"), Some("aes-256-cfb"));
+        assert_eq!(s(&m, "protocol"), Some("origin"));
+        assert_eq!(s(&m, "obfs"), Some("plain"));
+        // 内层 base64 解出: password=mypass123, obfsparam=obfshost.com, protoparam=protoval, remarks=SSR Node
+        assert_eq!(s(&m, "password"), Some("mypass123"));
+        assert_eq!(s(&m, "obfs-param"), Some("obfshost.com"));
+        assert_eq!(s(&m, "protocol-param"), Some("protoval"));
+        assert_eq!(s(&m, "name"), Some("SSR Node"));
+        assert_eq!(b(&m, "udp"), Some(true));
+        // 必须通过真实 validate_proxy_yaml
+        let yaml = serde_yaml::to_string(&Value::Mapping(m)).unwrap();
+        crate::exit_node::service::validate_proxy_yaml(&yaml).unwrap();
+    }
+
+    // ---- tuic ----
+    #[test]
+    fn tuic_v5_full() {
+        let uri = "tuic://b831381d-6324-4d53-ad4f-8cda48b30811:pass@host.example.com:443?sni=x.example.com&congestion_control=bbr&udp_relay_mode=native&alpn=h3#t-node";
+        let m = parse_tuic(uri).unwrap();
+        assert_eq!(s(&m, "type"), Some("tuic"));
+        assert_eq!(s(&m, "server"), Some("host.example.com"));
+        assert_eq!(i(&m, "port"), Some(443));
+        assert_eq!(s(&m, "uuid"), Some("b831381d-6324-4d53-ad4f-8cda48b30811"));
+        assert_eq!(s(&m, "password"), Some("pass"));
+        assert_eq!(s(&m, "sni"), Some("x.example.com"));
+        assert_eq!(s(&m, "congestion-controller"), Some("bbr"));
+        assert_eq!(s(&m, "udp-relay-mode"), Some("native"));
+        assert_eq!(s(&m, "name"), Some("t-node"));
+        let alpn = m.get(Value::String("alpn".into())).and_then(|v| v.as_sequence()).unwrap();
+        assert_eq!(alpn.len(), 1);
+        assert_eq!(alpn[0].as_str(), Some("h3"));
+        assert_eq!(b(&m, "udp"), Some(true));
+        // 必须通过真实 validate_proxy_yaml (uuid 36 位 + password 非空)
+        let yaml = serde_yaml::to_string(&Value::Mapping(m)).unwrap();
+        crate::exit_node::service::validate_proxy_yaml(&yaml).unwrap();
+    }
+
+    #[test]
+    fn tuic_v4_token_form() {
+        // v4: userinfo 不含 ':' → 映射 token, 不设 uuid/password
+        let uri = "tuic://sometoken@1.2.3.4:443?sni=x#v4";
+        let m = parse_tuic(uri).unwrap();
+        assert_eq!(s(&m, "type"), Some("tuic"));
+        assert_eq!(s(&m, "token"), Some("sometoken"));
+        assert!(m.get(Value::String("uuid".into())).is_none());
+        assert!(m.get(Value::String("password".into())).is_none());
+    }
+
     // ---- 列表 / 容错 ----
     #[test]
     fn unknown_scheme_skipped_silently() {
-        let raw = "ssr://garbage\nss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@1.2.3.4:8388#ok\ngarbageline";
+        // 注意: ssr:// 现已是已知 scheme, 这里换成真正未知的 wireguard:// 与裸 garbage 行。
+        let raw = "wireguard://garbage\nss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@1.2.3.4:8388#ok\ngarbageline";
         let (ps, failed) = parse_lines(raw);
         assert_eq!(ps.len(), 1);
-        // ssr:// / garbageline 都不是已知 scheme → 不计 failed
+        // wireguard:// / garbageline 都不是已知 scheme → 不计 failed
         assert_eq!(failed, 0);
         assert_eq!(s(&ps[0], "type"), Some("ss"));
     }
@@ -925,5 +1179,43 @@ mod tests {
         let uri = "ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@1.2.3.4:8388";
         let m = parse_ss(uri).unwrap();
         assert_eq!(s(&m, "name"), Some("1.2.3.4:8388"));
+    }
+
+    // ---- ssr/tuic 负向边界 (对抗审查建议固化) ----
+    fn ssr_b64(inner: &str) -> String {
+        use base64::Engine;
+        format!(
+            "ssr://{}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(inner)
+        )
+    }
+
+    #[test]
+    fn ssr_rejects_malformed() {
+        use base64::Engine;
+        let pw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("pw");
+        // 段数 < 6
+        assert!(parse_ssr(&ssr_b64("1.2.3.4:8388:origin")).is_none());
+        // port 越界
+        assert!(parse_ssr(&ssr_b64(&format!("1.2.3.4:70000:origin:aes-256-cfb:plain:{pw}"))).is_none());
+        // protocol 空
+        assert!(parse_ssr(&ssr_b64(&format!("1.2.3.4:8388::aes-256-cfb:plain:{pw}"))).is_none());
+        // obfs 空
+        assert!(parse_ssr(&ssr_b64(&format!("1.2.3.4:8388:origin:aes-256-cfb::{pw}"))).is_none());
+        // password 空 (末段 base64 为空串)
+        assert!(parse_ssr(&ssr_b64("1.2.3.4:8388:origin:aes-256-cfb:plain:")).is_none());
+        // 合法对照: 全部就位则正常解析
+        let ok = parse_ssr(&ssr_b64(&format!("1.2.3.4:8388:origin:aes-256-cfb:plain:{pw}"))).unwrap();
+        assert_eq!(s(&ok, "type"), Some("ssr"));
+        assert_eq!(s(&ok, "password"), Some("pw"));
+        assert_eq!(s(&ok, "cipher"), Some("aes-256-cfb"));
+        assert_eq!(s(&ok, "protocol"), Some("origin"));
+        assert_eq!(s(&ok, "obfs"), Some("plain"));
+    }
+
+    #[test]
+    fn tuic_empty_username_rejected() {
+        // v4 空 username: 既无 uuid 又无 token 的废节点应拒
+        assert!(parse_tuic("tuic://@host.net:443?sni=x#t").is_none());
     }
 }

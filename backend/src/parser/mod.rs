@@ -278,6 +278,10 @@ mod tests {
             "vless://b831381d-6324-4d53-ad4f-8cda48b30811@1.2.3.4:443?encryption=none&flow=xtls-rprx-vision&security=reality&sni=www.microsoft.com&fp=chrome&pbk=PUBKEY&sid=01ab&type=tcp#vless-reality".to_string(),
             "trojan://pw@example.com:443?sni=example.com#trojan-node".to_string(),
             "hysteria2://auth@1.2.3.4:8443?sni=example.com&obfs=salamander&obfs-password=op#hy2".to_string(),
+            // ssr 双层 base64 (method=aes-256-cfb obfs=plain protocol=origin, 均在白名单内)
+            "ssr://MS4yLjMuNDo4Mzg4Om9yaWdpbjphZXMtMjU2LWNmYjpwbGFpbjpiWGx3WVhOek1USXovP29iZnNwYXJhbT1iMkptYzJodmMzUXVZMjl0JnByb3RvcGFyYW09Y0hKdmRHOTJZV3cmcmVtYXJrcz1VMU5TSUU1dlpHVQ".to_string(),
+            // tuic v5 (uuid + password)
+            "tuic://b831381d-6324-4d53-ad4f-8cda48b30811:pass@1.2.3.4:443?sni=x&congestion_control=bbr&udp_relay_mode=native&alpn=h3#tuic-v5".to_string(),
         ];
         for uri in &samples {
             let (proxies, _failed) = super::uri::parse_lines(uri);
