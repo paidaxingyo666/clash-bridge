@@ -70,6 +70,7 @@ pub fn build(state: AppState) -> Router {
     Router::new()
         .nest("/api", api)
         .route("/sub/:token/clash.yaml", get(pub_h::public_subscription))
+        .route("/sub/:token/:format", get(pub_h::public_subscription_fmt))
         .with_state(state)
         .layer(cors)
         .layer(TraceLayer::new_for_http())

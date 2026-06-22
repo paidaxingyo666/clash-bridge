@@ -27,6 +27,9 @@ fn validate_input(input: &ProfileInput) -> AppResult<()> {
     if input.upstream_url.trim().is_empty() {
         return Err(AppError::BadRequest("upstream_url required".into()));
     }
+    // custom_rules 写时强语法校验 (段数 / RULE-TYPE / target 非空 / 静态白名单);
+    // 组名引用留生成时软校验.
+    crate::generator::rules::validate_syntax(input.custom_rules.as_deref())?;
     Ok(())
 }
 

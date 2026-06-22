@@ -39,9 +39,28 @@ fn within_sub_rate(token: &str) -> bool {
 
 /// GET /sub/:token/clash.yaml — 公开. 每次请求实时拉上游 + 实时生成 yaml.
 /// 失败 (上游不可达 / 解析失败 etc) 时回退到 cached_yaml.
+/// 静态段路由, 等价于 format=clash.yaml; 保留以向后兼容旧链接 + cached fallback.
 pub async fn public_subscription(
     State(s): State<AppState>,
     Path(token): Path<String>,
+) -> AppResult<axum::response::Response> {
+    serve_subscription(s, token, "clash.yaml").await
+}
+
+/// GET /sub/:token/:format — 公开. 多格式订阅.
+/// format ∈ {clash.yaml, singbox.json, sub.txt, surge.conf, quanx.conf}.
+/// clash.yaml 走 cached fallback; 其他格式实时生成失败直接报错 (不把 clash YAML 当 json 返回).
+pub async fn public_subscription_fmt(
+    State(s): State<AppState>,
+    Path((token, format)): Path<(String, String)>,
+) -> AppResult<axum::response::Response> {
+    serve_subscription(s, token, &format).await
+}
+
+async fn serve_subscription(
+    s: AppState,
+    token: String,
+    format: &str,
 ) -> AppResult<axum::response::Response> {
     let profile = profile_repo::find_by_token(&s.db, &token)
         .await?
@@ -93,9 +112,19 @@ pub async fn public_subscription(
         .as_ref()
         .and_then(|p| p.last_upstream_userinfo.clone())
         .or_else(|| profile.last_upstream_userinfo.clone());
-    match gen_service::build_and_cache(&s.db, user_id, profile_id).await {
-        Ok(out) => Ok(yaml_response(&profile.name, out.yaml, upstream_userinfo.as_deref())),
+
+    match gen_service::build_and_cache_fmt(&s.db, user_id, profile_id, format).await {
+        Ok(out) => Ok(rendered_response(
+            &profile.name,
+            out.rendered,
+            upstream_userinfo.as_deref(),
+        )),
         Err(e) => {
+            // 非 clash 格式: 失败不回退 cached_yaml (cached 是 clash YAML, 当 json 返回会让客户端连不上).
+            // 415 / 404 / 暂未实现 等明确错误也直接抛出.
+            if format != "clash.yaml" || matches!(e, AppError::Unsupported(_) | AppError::NotFound) {
+                return Err(e);
+            }
             warn!(error = ?e, "/sub: live generate failed, fallback to cached_yaml");
             // 复用上面重读的 refreshed 取 cached_yaml (build_and_cache 失败时没机会写, 用之前缓存的)
             let cached = refreshed
@@ -103,7 +132,12 @@ pub async fn public_subscription(
                 .ok_or_else(|| AppError::BadRequest(format!(
                     "无法实时生成订阅且无缓存可用: {e}"
                 )))?;
-            Ok(yaml_response(&profile.name, cached, upstream_userinfo.as_deref()))
+            let rendered = crate::generator::render::RenderedSub::new(
+                cached,
+                "application/yaml; charset=utf-8",
+                "yaml",
+            );
+            Ok(rendered_response(&profile.name, rendered, upstream_userinfo.as_deref()))
         }
     }
 }
@@ -118,37 +152,73 @@ fn subscription_userinfo_header(upstream: Option<&str>) -> String {
     }
 }
 
-fn yaml_response(
+/// 泛化的订阅响应: Content-Type / Content-Disposition 由 RenderedSub 决定;
+/// 渲染时被跳过的协议经 `X-Skipped-Protocols` 头透出, 避免静默丢节点.
+fn rendered_response(
     profile_name: &str,
-    body: String,
+    rendered: crate::generator::render::RenderedSub,
     upstream_userinfo: Option<&str>,
 ) -> axum::response::Response {
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "application/yaml; charset=utf-8".to_string()),
-            (header::CONTENT_DISPOSITION, build_content_disposition(profile_name)),
-            (
-                header::HeaderName::from_static("subscription-userinfo"),
-                subscription_userinfo_header(upstream_userinfo),
-            ),
-        ],
-        body,
-    )
-        .into_response()
+    let mut resp = (StatusCode::OK, rendered.body).into_response();
+    let h = resp.headers_mut();
+    if let Ok(v) = header::HeaderValue::from_str(rendered.content_type) {
+        h.insert(header::CONTENT_TYPE, v);
+    }
+    if let Ok(v) = header::HeaderValue::from_str(&build_content_disposition(
+        profile_name,
+        rendered.filename_ext,
+    )) {
+        h.insert(header::CONTENT_DISPOSITION, v);
+    }
+    if let Ok(v) = header::HeaderValue::from_str(&subscription_userinfo_header(upstream_userinfo)) {
+        h.insert(
+            header::HeaderName::from_static("subscription-userinfo"),
+            v,
+        );
+    }
+    if !rendered.skipped.is_empty() {
+        // skipped 项可能含上游节点名 (非 ASCII / 控制字符), 直接进 header 会让 from_str 失败、
+        // 整条头丢失。逐项 sanitize 为可见 ASCII, 保证头一定能设上。
+        let safe = sanitize_skipped_header(&rendered.skipped);
+        if let Ok(v) = header::HeaderValue::from_str(&safe) {
+            h.insert(header::HeaderName::from_static("x-skipped-protocols"), v);
+        }
+    }
+    resp
+}
+
+/// 把 skipped 列表拼成 header-safe 字符串: 每项非 ASCII / 控制字符替换为 '_',
+/// 保留可见 ASCII (含冒号分隔的类型前缀如 `ssr` / `tuic-v4` / `rule-dangling-target`)。
+fn sanitize_skipped_header(skipped: &[String]) -> String {
+    skipped
+        .iter()
+        .map(|s| {
+            s.chars()
+                .map(|c| {
+                    if c.is_ascii() && !c.is_ascii_control() {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// RFC 6266 Content-Disposition. 不带引号; 含中文等非 ASCII 时再带 RFC 5987 `filename*=UTF-8''…`.
-fn build_content_disposition(profile_name: &str) -> String {
+/// `ext` 为文件扩展名 (不含点), 如 `yaml` / `json` / `conf`.
+fn build_content_disposition(profile_name: &str, ext: &str) -> String {
     let ascii = sanitize_ascii(profile_name);
     let all_safe_ascii = profile_name
         .chars()
         .all(|c| c.is_ascii() && safe_ascii_char(c));
     if all_safe_ascii && !profile_name.is_empty() {
-        format!("attachment; filename={ascii}.yaml")
+        format!("attachment; filename={ascii}.{ext}")
     } else {
         let pct = percent_encode_utf8(profile_name);
-        format!("attachment; filename={ascii}.yaml; filename*=UTF-8''{pct}.yaml")
+        format!("attachment; filename={ascii}.{ext}; filename*=UTF-8''{pct}.{ext}")
     }
 }
 
@@ -208,5 +278,23 @@ mod tests {
         // 空串 / 纯空白 → 回退默认 0 骨架
         assert_eq!(subscription_userinfo_header(Some("")), DEFAULT_SKELETON);
         assert_eq!(subscription_userinfo_header(Some("   ")), DEFAULT_SKELETON);
+    }
+
+    #[test]
+    fn skipped_header_sanitizes_non_ascii() {
+        // 含中文 / 控制字符的节点名 → 非 ASCII 替换为 '_', 整条头仍可设上。
+        let skipped = vec![
+            "ssr:香港节点".to_string(),
+            "tuic-v4:JP\u{7}01".to_string(),
+            "rule-dangling-target:Proxies".to_string(),
+        ];
+        let s = sanitize_skipped_header(&skipped);
+        // 结果必须是合法 header value。
+        assert!(header::HeaderValue::from_str(&s).is_ok());
+        assert!(s.contains("ssr:"));
+        assert!(s.contains("tuic-v4:JP_01"));
+        assert!(s.contains("rule-dangling-target:Proxies"));
+        // 不含任何非 ASCII / 控制字符。
+        assert!(s.chars().all(|c| c.is_ascii() && !c.is_ascii_control()));
     }
 }

@@ -25,6 +25,10 @@ pub enum AppError {
     #[error("upstream error: {0}")]
     Upstream(String),
 
+    /// 该订阅 / 格式组合无法表达 (如含 relay 链路的 profile 请求不支持 detour 的格式) → 415。
+    #[error("unsupported: {0}")]
+    Unsupported(String),
+
     #[error(transparent)]
     Sqlx(#[from] sqlx::Error),
 
@@ -68,6 +72,7 @@ impl IntoResponse for AppError {
             AppError::BadRequest(_) => (StatusCode::BAD_REQUEST, self.to_string()),
             AppError::Conflict(_) => (StatusCode::CONFLICT, self.to_string()),
             AppError::Upstream(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
+            AppError::Unsupported(m) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, m.clone()),
             AppError::Sqlx(e) => {
                 error!(error = ?e, "sqlx error");
                 (StatusCode::INTERNAL_SERVER_ERROR, "database error".into())
