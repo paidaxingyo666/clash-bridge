@@ -8,6 +8,7 @@ import { Table, THead, TBody, TR, TH, TD } from "@/components/ui/table";
 import { ProfileEditor } from "@/components/profile-editor";
 import { HistoryDialog } from "@/components/history-dialog";
 import { QrDialog } from "@/components/qr-dialog";
+import { SubLinksDialog } from "@/components/sub-links-dialog";
 import { api, PUBLIC_URL } from "@/lib/api";
 import type {
   ExitNode,
@@ -26,6 +27,7 @@ import {
   KeyRound,
   Cloud,
   History,
+  Link2,
 } from "lucide-react";
 
 export default function ProfilesPage() {
@@ -35,6 +37,7 @@ export default function ProfilesPage() {
   const [editing, setEditing] = useState<OutputProfile | null>(null);
   const [historyFor, setHistoryFor] = useState<OutputProfile | null>(null);
   const [qrFor, setQrFor] = useState<OutputProfile | null>(null);
+  const [linksFor, setLinksFor] = useState<OutputProfile | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -278,10 +281,18 @@ export default function ProfilesPage() {
                         <Button
                           size="icon"
                           variant="ghost"
-                          title="复制订阅地址"
+                          title="复制订阅地址 (Clash)"
                           onClick={() => copyUrl(p)}
                         >
                           <Copy className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          title="全部格式订阅链接"
+                          onClick={() => setLinksFor(p)}
+                        >
+                          <Link2 className="h-4 w-4" />
                         </Button>
                         <Button
                           size="icon"
@@ -362,6 +373,16 @@ export default function ProfilesPage() {
         onOpenChange={(v) => !v && setQrFor(null)}
         url={qrFor ? subUrl(qrFor) : ""}
         name={qrFor?.name}
+      />
+
+      <SubLinksDialog
+        open={linksFor !== null}
+        onOpenChange={(v) => !v && setLinksFor(null)}
+        profile={linksFor}
+        base={
+          PUBLIC_URL ||
+          (typeof window !== "undefined" ? window.location.origin : "")
+        }
       />
     </div>
   );
