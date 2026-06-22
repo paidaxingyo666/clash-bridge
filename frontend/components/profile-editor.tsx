@@ -21,6 +21,7 @@ import { Cloud, Eye, Loader2 } from "lucide-react";
 type Form = {
   name: string;
   upstream_url: string;
+  upstream_format: string;
   bridge_node_names: string[];
   exit_node_ids: string[];
   fetch_via_exit_node_id: string | null;
@@ -31,12 +32,22 @@ type Form = {
 const empty: Form = {
   name: "",
   upstream_url: "",
+  upstream_format: "auto",
   bridge_node_names: [],
   exit_node_ids: [],
   fetch_via_exit_node_id: null,
   custom_rules: "",
   enabled: true,
 };
+
+// 订阅格式下拉选项
+const FORMAT_OPTIONS: { value: string; label: string }[] = [
+  { value: "auto", label: "自动探测（默认）" },
+  { value: "clash", label: "Clash / Mihomo YAML" },
+  { value: "base64", label: "Base64 通用订阅" },
+  { value: "uri", label: "裸节点 URI 列表" },
+  { value: "sip008", label: "SIP008 JSON" },
+];
 
 export function ProfileEditor({
   open,
@@ -67,6 +78,7 @@ export function ProfileEditor({
       setForm({
         name: initial.name,
         upstream_url: initial.upstream_url,
+        upstream_format: initial.upstream_format ?? "auto",
         bridge_node_names: initial.bridge_node_names,
         exit_node_ids: initial.exit_node_ids,
         fetch_via_exit_node_id: initial.fetch_via_exit_node_id ?? null,
@@ -117,6 +129,7 @@ export function ProfileEditor({
         const created = await api.post<OutputProfile>("/api/profiles", {
           name: form.name,
           upstream_url: form.upstream_url,
+          upstream_format: form.upstream_format,
           bridge_node_names: [],
           exit_node_ids: form.exit_node_ids,
           fetch_via_exit_node_id: form.fetch_via_exit_node_id,
@@ -172,6 +185,7 @@ export function ProfileEditor({
       const payload = {
         name: form.name,
         upstream_url: form.upstream_url,
+        upstream_format: form.upstream_format,
         bridge_node_names: form.bridge_node_names,
         exit_node_ids: form.exit_node_ids,
         fetch_via_exit_node_id: form.fetch_via_exit_node_id,
@@ -211,6 +225,7 @@ export function ProfileEditor({
       await api.put(`/api/profiles/${editingId}`, {
         name: form.name,
         upstream_url: form.upstream_url,
+        upstream_format: form.upstream_format,
         bridge_node_names: form.bridge_node_names,
         exit_node_ids: form.exit_node_ids,
         fetch_via_exit_node_id: form.fetch_via_exit_node_id,
@@ -301,6 +316,27 @@ export function ProfileEditor({
                 )}
                 拉取节点
               </Button>
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <Label>订阅格式</Label>
+            <select
+              className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              value={form.upstream_format}
+              onChange={(e) =>
+                setForm({ ...form, upstream_format: e.target.value })
+              }
+            >
+              {FORMAT_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+            <div className="text-xs text-muted-foreground">
+              除 Clash/Mihomo YAML 外，还支持 Base64 通用订阅、裸节点 URI 列表（ss/vmess/vless/trojan/hysteria2）、SIP008。
+              「自动探测」会按 clash → sip008 → base64 → uri 顺序识别；若机场格式固定，显式指定可更稳。
             </div>
           </div>
 

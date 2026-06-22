@@ -26,6 +26,8 @@ impl AppState {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(config.upstream_fetch_timeout_secs))
             .user_agent("clash.meta/1.18.0")
+            // 限制重定向跳数, 防订阅源把我们引去内网 / 无限重定向 (配合归一化层的 SSRF 单租户可信假设)
+            .redirect(reqwest::redirect::Policy::limited(3))
             .build()?;
 
         Ok(Self {

@@ -281,6 +281,7 @@ dependencies = [
  "argon2",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "dashmap 6.1.0",
  "dotenvy",
@@ -301,6 +302,7 @@ dependencies = [
  "tower_governor",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 

@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::error::{AppError, AppResult};
 use crate::exit_node::{repo as exit_repo, service as exit_service};
 use crate::history::repo as history_repo;
+use crate::parser::{self, SubFormat};
 use crate::profile::model::OutputProfile;
 use crate::profile::repo;
 
@@ -14,6 +15,9 @@ pub const TRIGGER_MANUAL: &str = "manual";
 pub const TRIGGER_AUTO: &str = "auto";
 /// 由客户端访问 /sub URL 触发的拉取
 pub const TRIGGER_CLIENT: &str = "client_fetch";
+
+/// 上游订阅 body 大小上限 (8 MiB). 超过即拒绝, 防止内存被超大响应撑爆.
+const MAX_UPSTREAM_BODY_BYTES: u64 = 8 * 1024 * 1024;
 
 /// 拉取上游订阅，把 yaml 文本存到 profile.last_upstream_yaml。
 /// 并在内容 hash 与上一条历史不同时，写一条新历史记录。
@@ -45,7 +49,30 @@ pub async fn refresh_upstream_by_profile(
     match client.get(&profile.upstream_url).send().await {
         Ok(resp) => {
             let status = resp.status();
+            // body 大小上限 (第一保险): Content-Length 已超过即拒, 不读 body.
+            if let Some(len) = resp.content_length() {
+                if len > MAX_UPSTREAM_BODY_BYTES {
+                    let err = format!(
+                        "上游响应体过大 ({} 字节 > {} 字节上限), 拒绝处理",
+                        len, MAX_UPSTREAM_BODY_BYTES
+                    );
+                    repo::save_upstream_fetch(db, profile.id, None, "error", Some(&err), Utc::now())
+                        .await?;
+                    return Err(AppError::Upstream(err));
+                }
+            }
             let text = resp.text().await.unwrap_or_default();
+            // body 大小上限 (第二保险, 防 chunked 无 Content-Length).
+            if text.len() as u64 > MAX_UPSTREAM_BODY_BYTES {
+                let err = format!(
+                    "上游响应体过大 ({} 字节 > {} 字节上限), 拒绝处理",
+                    text.len(),
+                    MAX_UPSTREAM_BODY_BYTES
+                );
+                repo::save_upstream_fetch(db, profile.id, None, "error", Some(&err), Utc::now())
+                    .await?;
+                return Err(AppError::Upstream(err));
+            }
             if !status.is_success() {
                 let err = format_http_error(status.as_u16(), &text);
                 repo::save_upstream_fetch(db, profile.id, None, "error", Some(&err), Utc::now())
@@ -58,15 +85,30 @@ pub async fn refresh_upstream_by_profile(
                     .await?;
                 return Err(AppError::Upstream(err));
             }
-            // 写 profile 的 last_upstream_yaml
-            repo::save_upstream_fetch(db, profile.id, Some(&text), "success", None, Utc::now())
+
+            // 归一化层: 把任意订阅格式 (clash/base64/uri/sip008) 转成统一 IR =
+            // {proxies: [...]} 的 Clash YAML, 再存库. 下游 generator/extract_nodes 不变.
+            let hint = SubFormat::from_opt(profile.upstream_format.as_deref());
+            let clash_yaml = match parser::normalize_to_clash_yaml(&text, hint) {
+                Ok((yaml, _count)) => yaml,
+                Err(e) => {
+                    // 归一化失败: 不覆盖旧缓存 (yaml=None → COALESCE 保留), 仅落 error 状态.
+                    let err = format!("订阅格式解析失败: {e}");
+                    repo::save_upstream_fetch(db, profile.id, None, "error", Some(&err), Utc::now())
+                        .await?;
+                    return Err(AppError::BadRequest(err));
+                }
+            };
+
+            // 写 profile 的 last_upstream_yaml (归一化后的 Clash YAML)
+            repo::save_upstream_fetch(db, profile.id, Some(&clash_yaml), "success", None, Utc::now())
                 .await?;
-            // dedup 写历史
-            let hash = history_repo::hash_yaml(&text);
+            // dedup 写历史 (基于归一化后的内容 hash)
+            let hash = history_repo::hash_yaml(&clash_yaml);
             let prev = history_repo::latest_hash(db, profile.id).await?;
             if prev.as_deref() != Some(hash.as_str()) {
-                let cnt = history_repo::count_proxies(&text);
-                history_repo::create(db, profile.id, &text, &hash, cnt, trigger).await?;
+                let cnt = history_repo::count_proxies(&clash_yaml);
+                history_repo::create(db, profile.id, &clash_yaml, &hash, cnt, trigger).await?;
             }
             Ok(())
         }
@@ -109,6 +151,7 @@ async fn build_proxied_client(
     reqwest::Client::builder()
         .timeout(Duration::from_secs(45))
         .user_agent("clash.meta/1.18.0")
+        .redirect(reqwest::redirect::Policy::limited(3))
         .proxy(proxy)
         .build()
         .map_err(|e| AppError::Internal(format!("构造代理 client 失败: {e}")))

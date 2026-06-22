@@ -13,6 +13,8 @@ pub struct OutputProfile {
     pub sub_token: String,
 
     pub upstream_url: String,
+    /// 上游订阅输入格式: auto / clash / base64 / uri / sip008. 默认 auto (DB NOT NULL DEFAULT 'auto')。
+    pub upstream_format: Option<String>,
     pub last_upstream_yaml: Option<String>,
     pub last_upstream_fetched_at: Option<DateTime<Utc>>,
     pub last_upstream_fetch_status: Option<String>,
@@ -47,6 +49,7 @@ pub struct OutputProfileView {
     pub sub_token: String,
 
     pub upstream_url: String,
+    pub upstream_format: Option<String>,
     pub last_upstream_fetched_at: Option<DateTime<Utc>>,
     pub last_upstream_fetch_status: Option<String>,
     pub last_upstream_fetch_error: Option<String>,
@@ -75,6 +78,7 @@ impl From<&OutputProfile> for OutputProfileView {
             name: p.name.clone(),
             sub_token: p.sub_token.clone(),
             upstream_url: p.upstream_url.clone(),
+            upstream_format: p.upstream_format.clone(),
             last_upstream_fetched_at: p.last_upstream_fetched_at,
             last_upstream_fetch_status: p.last_upstream_fetch_status.clone(),
             last_upstream_fetch_error: p.last_upstream_fetch_error.clone(),
@@ -98,6 +102,9 @@ impl From<&OutputProfile> for OutputProfileView {
 pub struct ProfileInput {
     pub name: String,
     pub upstream_url: String,
+    /// 上游订阅格式: auto / clash / base64 / uri / sip008. 不传默认 auto。
+    #[serde(default)]
+    pub upstream_format: Option<String>,
     pub bridge_node_names: Vec<String>,
     pub exit_node_ids: Vec<Uuid>,
     #[serde(default)]

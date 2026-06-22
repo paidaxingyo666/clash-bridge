@@ -5,6 +5,7 @@ mod exit_node;
 mod generator;
 mod history;
 mod middleware;
+mod parser;
 mod profile;
 mod publish;
 mod router;

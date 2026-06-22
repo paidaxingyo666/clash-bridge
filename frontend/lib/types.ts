@@ -25,6 +25,7 @@ export type OutputProfile = {
   sub_token: string;
 
   upstream_url: string;
+  upstream_format: string | null;
   last_upstream_fetched_at: string | null;
   last_upstream_fetch_status: string | null;
   last_upstream_fetch_error: string | null;

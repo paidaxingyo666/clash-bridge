@@ -52,6 +52,7 @@ pub async fn create(
     name: &str,
     sub_token: &str,
     upstream_url: &str,
+    upstream_format: Option<&str>,
     bridge_node_names: &[String],
     exit_node_ids: &[Uuid],
     fetch_via_exit_node_id: Option<Uuid>,
@@ -60,14 +61,15 @@ pub async fn create(
 ) -> AppResult<OutputProfile> {
     let row = sqlx::query_as::<_, OutputProfile>(
         "INSERT INTO output_profiles \
-         (user_id, name, sub_token, upstream_url, bridge_node_names, exit_node_ids, \
+         (user_id, name, sub_token, upstream_url, upstream_format, bridge_node_names, exit_node_ids, \
           fetch_via_exit_node_id, custom_rules, enabled) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *",
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *",
     )
     .bind(user_id)
     .bind(name)
     .bind(sub_token)
     .bind(upstream_url)
+    .bind(upstream_format.unwrap_or("auto"))
     .bind(SqlxJson(bridge_node_names.to_vec()))
     .bind(SqlxJson(exit_node_ids.to_vec()))
     .bind(fetch_via_exit_node_id)
@@ -84,6 +86,7 @@ pub async fn update(
     id: Uuid,
     name: &str,
     upstream_url: &str,
+    upstream_format: Option<&str>,
     bridge_node_names: &[String],
     exit_node_ids: &[Uuid],
     fetch_via_exit_node_id: Option<Uuid>,
@@ -92,12 +95,13 @@ pub async fn update(
 ) -> AppResult<Option<OutputProfile>> {
     let row = sqlx::query_as::<_, OutputProfile>(
         "UPDATE output_profiles SET \
-            name=$1, upstream_url=$2, bridge_node_names=$3, exit_node_ids=$4, \
-            fetch_via_exit_node_id=$5, custom_rules=$6, enabled=$7, updated_at=NOW() \
-         WHERE user_id=$8 AND id=$9 RETURNING *",
+            name=$1, upstream_url=$2, upstream_format=$3, bridge_node_names=$4, exit_node_ids=$5, \
+            fetch_via_exit_node_id=$6, custom_rules=$7, enabled=$8, updated_at=NOW() \
+         WHERE user_id=$9 AND id=$10 RETURNING *",
     )
     .bind(name)
     .bind(upstream_url)
+    .bind(upstream_format.unwrap_or("auto"))
     .bind(SqlxJson(bridge_node_names.to_vec()))
     .bind(SqlxJson(exit_node_ids.to_vec()))
     .bind(fetch_via_exit_node_id)
