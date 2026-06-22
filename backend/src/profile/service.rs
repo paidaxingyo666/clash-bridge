@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use chrono::Utc;
+use futures_util::StreamExt;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -61,18 +62,17 @@ pub async fn refresh_upstream_by_profile(
                     return Err(AppError::Upstream(err));
                 }
             }
-            let text = resp.text().await.unwrap_or_default();
-            // body 大小上限 (第二保险, 防 chunked 无 Content-Length).
-            if text.len() as u64 > MAX_UPSTREAM_BODY_BYTES {
-                let err = format!(
-                    "上游响应体过大 ({} 字节 > {} 字节上限), 拒绝处理",
-                    text.len(),
-                    MAX_UPSTREAM_BODY_BYTES
-                );
-                repo::save_upstream_fetch(db, profile.id, None, "error", Some(&err), Utc::now())
-                    .await?;
-                return Err(AppError::Upstream(err));
-            }
+            // body 大小上限 (第二保险, 防 chunked 无 Content-Length):
+            // 流式边读边累计, 超限立即中止, 不把整个 body 读进内存.
+            let text = match read_body_limited(resp, MAX_UPSTREAM_BODY_BYTES).await {
+                Ok(t) => t,
+                Err(e) => {
+                    let err = e.to_string();
+                    repo::save_upstream_fetch(db, profile.id, None, "error", Some(&err), Utc::now())
+                        .await?;
+                    return Err(e);
+                }
+            };
             if !status.is_success() {
                 let err = format_http_error(status.as_u16(), &text);
                 repo::save_upstream_fetch(db, profile.id, None, "error", Some(&err), Utc::now())
@@ -155,6 +155,28 @@ async fn build_proxied_client(
         .proxy(proxy)
         .build()
         .map_err(|e| AppError::Internal(format!("构造代理 client 失败: {e}")))
+}
+
+/// 流式读取响应体, 累计字节超过 `max` 立即返回 Err, 不把整个 body 读进内存.
+/// 读取错误也返回 Err (不静默吞掉). 与 Content-Length 第一保险互补:
+/// 第一保险快速拒绝声明了超大长度的响应; 本函数兜底 chunked / 无 Content-Length 的情况.
+async fn read_body_limited(resp: reqwest::Response, max: u64) -> AppResult<String> {
+    let mut stream = resp.bytes_stream();
+    let mut buf: Vec<u8> = Vec::new();
+    let mut total: u64 = 0;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| AppError::Upstream(format!("读取上游响应体失败: {e}")))?;
+        total += chunk.len() as u64;
+        if total > max {
+            return Err(AppError::Upstream(format!(
+                "上游响应体过大 (>{max} 字节上限), 拒绝处理"
+            )));
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    // 上游订阅是文本 (YAML / base64 / JSON / URI 列表); 非法 UTF-8 用 lossy 容错,
+    // 后续归一化层会再做格式校验.
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// 把上游返回的失败 body 翻成给用户看的短消息.

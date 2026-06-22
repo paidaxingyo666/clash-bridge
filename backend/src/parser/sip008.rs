@@ -56,6 +56,12 @@ pub fn parse(raw: &str) -> AppResult<(String, usize)> {
         ins(&mut m, "password", Value::String(s.password.clone()));
         ins(&mut m, "udp", Value::Bool(true));
         if let Some(plugin) = s.plugin.as_deref().filter(|p| !p.trim().is_empty()) {
+            // 插件名归一: obfs-local / simple-obfs → obfs (mihomo 不认 obfs-local)，
+            // 与 uri.rs apply_ss_plugin 的映射保持一致。
+            let plugin = match plugin.trim() {
+                "obfs-local" | "simple-obfs" => "obfs",
+                other => other,
+            };
             ins(&mut m, "plugin", Value::String(plugin.to_string()));
             if let Some(opts) = s.plugin_opts.as_deref().filter(|p| !p.trim().is_empty()) {
                 if let Some(opts_map) = plugin_opts_to_mapping(opts) {
@@ -162,12 +168,27 @@ mod tests {
         let (yaml, n) = parse(raw).unwrap();
         assert_eq!(n, 1);
         let ps = proxies_of(&yaml);
-        assert_eq!(s(&ps[0], "plugin"), Some("obfs-local"));
+        // obfs-local 归一为 obfs (mihomo schema)
+        assert_eq!(s(&ps[0], "plugin"), Some("obfs"));
         let po = ps[0]
             .get(Value::String("plugin-opts".into()))
             .and_then(|v| v.as_mapping())
             .unwrap();
         assert_eq!(s(po, "mode"), Some("http"));
         assert_eq!(s(po, "host"), Some("www.bing.com"));
+    }
+
+    #[test]
+    fn sip008_plugin_simple_obfs_normalized() {
+        // simple-obfs 同样归一为 obfs
+        let raw = r#"{
+            "version": 1,
+            "servers": [
+                {"server":"1.2.3.4","server_port":8388,"password":"pw","method":"aes-256-gcm","plugin":"simple-obfs","plugin_opts":"obfs=tls"}
+            ]
+        }"#;
+        let (yaml, _) = parse(raw).unwrap();
+        let ps = proxies_of(&yaml);
+        assert_eq!(s(&ps[0], "plugin"), Some("obfs"));
     }
 }

@@ -32,22 +32,35 @@ pub fn has_known_scheme_line(raw: &str) -> bool {
     raw.lines().map(|l| l.trim()).any(is_known_scheme)
 }
 
-/// 逐行解析裸 URI → proxy Mapping 列表。无法识别的行静默跳过。
-pub fn parse_lines(raw: &str) -> Vec<Mapping> {
+/// 逐行解析裸 URI → proxy Mapping 列表。
+///
+/// 返回 `(proxies, failed)`。`failed` = "以已知 scheme 开头但解析失败" 的行数;
+/// 非已知 scheme 的行 (未知协议/垃圾行) 继续静默跳过, 不计入 failed。
+pub fn parse_lines(raw: &str) -> (Vec<Mapping>, usize) {
     let mut out = Vec::new();
+    let mut failed = 0usize;
     let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     for line in raw.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        if let Some(mut m) = parse_one(line) {
-            // 名称去重 (Clash 节点名必须唯一，否则后续 dialer/group 引用混乱)
-            dedup_name(&mut m, &mut seen_names);
-            out.push(m);
+        match parse_one(line) {
+            Some(mut m) => {
+                // 名称去重 (Clash 节点名必须唯一，否则后续 dialer/group 引用混乱)
+                dedup_name(&mut m, &mut seen_names);
+                out.push(m);
+            }
+            None => {
+                // 已知 scheme 却解析失败 → 计入 failed (疑似上游格式不兼容);
+                // 非已知 scheme 的行静默跳过。
+                if is_known_scheme(line) {
+                    failed += 1;
+                }
+            }
         }
     }
-    out
+    (out, failed)
 }
 
 fn dedup_name(m: &mut Mapping, seen: &mut std::collections::HashSet<String>) {
@@ -217,8 +230,8 @@ fn parse_ss(uri: &str) -> Option<Mapping> {
 
     // userinfo 可能是 base64(method:password) 或明文 method:password
     let creds = if let Some((method, password)) = userinfo.split_once(':') {
-        // 明文 (SIP022)
-        (method.to_string(), password.to_string())
+        // 明文 (SIP022)。password 可能含 %XX, 需 percent-decode。
+        (method.to_string(), pct_decode(password))
     } else {
         // base64url(method:password)
         let decoded = decode_b64_flex(&userinfo)?;
@@ -283,6 +296,9 @@ fn apply_ss_plugin(m: &mut Mapping, plugin_raw: &str) {
                 "obfs-host" => ins_str(&mut opts, "host", v.trim()),
                 other => ins_str(&mut opts, other, v.trim()),
             }
+        } else {
+            // 裸 flag (如 v2ray-plugin 的 tls / mux) → bool true
+            ins(&mut opts, part, Value::Bool(true));
         }
     }
     if !opts.is_empty() {
@@ -304,7 +320,7 @@ fn parse_vmess(uri: &str) -> Option<Mapping> {
     let add = json_str(obj, "add")?;
     let port = json_port(obj, "port")?;
     let id = json_str(obj, "id")?;
-    if add.trim().is_empty() || id.trim().is_empty() {
+    if add.trim().is_empty() || id.trim().is_empty() || !(1..=65535).contains(&port) {
         return None;
     }
 
@@ -733,6 +749,29 @@ mod tests {
     }
 
     #[test]
+    fn ss_sip022_password_percent_decoded() {
+        // SIP022 明文 password 含 %XX (p%40ss → p@ss)
+        let uri = "ss://2022-blake3-aes-256-gcm:p%40ss@h.example.com:443#enc";
+        let m = parse_ss(uri).unwrap();
+        assert_eq!(s(&m, "cipher"), Some("2022-blake3-aes-256-gcm"));
+        assert_eq!(s(&m, "password"), Some("p@ss"));
+        assert_eq!(s(&m, "server"), Some("h.example.com"));
+        assert_eq!(i(&m, "port"), Some(443));
+    }
+
+    #[test]
+    fn ss_v2ray_plugin_bare_tls_flag() {
+        // v2ray-plugin 的裸 flag tls / mux 应转成 plugin-opts.tls=true / mux=true
+        let uri = "ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@1.2.3.4:8388?plugin=v2ray-plugin%3Bmode%3Dwebsocket%3Btls%3Bhost%3Dx.com#p";
+        let m = parse_ss(uri).unwrap();
+        assert_eq!(s(&m, "plugin"), Some("v2ray-plugin"));
+        let po = nested(&m, "plugin-opts").unwrap();
+        assert_eq!(b(po, "tls"), Some(true));
+        assert_eq!(s(po, "mode"), Some("websocket"));
+        assert_eq!(s(po, "host"), Some("x.com"));
+    }
+
+    #[test]
     fn ss_with_obfs_plugin() {
         let uri = "ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@1.2.3.4:8388?plugin=obfs-local%3Bobfs%3Dhttp%3Bobfs-host%3Dwww.bing.com#p";
         let m = parse_ss(uri).unwrap();
@@ -774,6 +813,15 @@ mod tests {
         assert_eq!(i(&m, "port"), Some(8080));
         assert_eq!(i(&m, "alterId"), Some(2));
         assert_eq!(b(&m, "tls"), Some(false));
+    }
+
+    #[test]
+    fn vmess_port_out_of_range_rejected() {
+        use base64::Engine;
+        // port=70000 越界 → parse_vmess 返回 None
+        let json = r#"{"v":"2","ps":"n","add":"1.1.1.1","port":70000,"id":"b831381d-6324-4d53-ad4f-8cda48b30811","net":"tcp"}"#;
+        let uri = format!("vmess://{}", base64::engine::general_purpose::STANDARD.encode(json));
+        assert!(parse_vmess(&uri).is_none());
     }
 
     // ---- vless + reality ----
@@ -856,15 +904,17 @@ mod tests {
     #[test]
     fn unknown_scheme_skipped_silently() {
         let raw = "ssr://garbage\nss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@1.2.3.4:8388#ok\ngarbageline";
-        let ps = parse_lines(raw);
+        let (ps, failed) = parse_lines(raw);
         assert_eq!(ps.len(), 1);
+        // ssr:// / garbageline 都不是已知 scheme → 不计 failed
+        assert_eq!(failed, 0);
         assert_eq!(s(&ps[0], "type"), Some("ss"));
     }
 
     #[test]
     fn duplicate_names_deduped() {
         let raw = "ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@1.2.3.4:8388#dup\nss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@5.6.7.8:8388#dup";
-        let ps = parse_lines(raw);
+        let (ps, _failed) = parse_lines(raw);
         assert_eq!(ps.len(), 2);
         assert_eq!(s(&ps[0], "name"), Some("dup"));
         assert_eq!(s(&ps[1], "name"), Some("dup-2"));

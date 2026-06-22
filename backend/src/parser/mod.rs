@@ -113,6 +113,18 @@ fn parse_clash(raw: &str) -> AppResult<(String, usize)> {
     if count == 0 {
         return Err(AppError::BadRequest("Clash YAML 的 proxies 数组为空".into()));
     }
+    // 二次确认加固：至少一个元素是 mapping 且含 "type" 键，
+    // 否则可能是 proxies:[null] 或 "结构合法但内容垃圾" 的 YAML 蒙混过关。
+    let has_real_proxy = proxies.iter().any(|p| {
+        p.as_mapping()
+            .map(|pm| pm.contains_key(Value::String("type".into())))
+            .unwrap_or(false)
+    });
+    if !has_real_proxy {
+        return Err(AppError::BadRequest(
+            "Clash YAML 的 proxies 数组无任何含 type 字段的有效节点 (疑似空/垃圾内容)".into(),
+        ));
+    }
     // 原样返回 (保留上游全部结构 — generator 需要 proxy-groups / rules 等)
     Ok((raw.to_string(), count))
 }
@@ -125,11 +137,23 @@ fn parse_base64(raw: &str) -> AppResult<(String, usize)> {
 }
 
 /// URI 列表分支：逐行解析裸节点 URI → proxy mapping，组装成 Clash IR。
+///
+/// 部分节点失败保护：若 "以已知 scheme 开头却解析失败" 的行数 ≥ 成功数 (failed >= proxies.len())，
+/// 大概率是上游格式升级 / 不兼容，宁可整体报错走 yaml=None 分支 (COALESCE 保留旧缓存)，
+/// 也不要用残缺结果覆盖好缓存，导致用户大面积掉节点。
 fn parse_uri_list(raw: &str) -> AppResult<(String, usize)> {
-    let proxies = uri::parse_lines(raw);
+    let (proxies, failed) = uri::parse_lines(raw);
     if proxies.is_empty() {
         return Err(AppError::BadRequest(format!(
             "URI 列表里没有解析出任何有效节点。前 200 字符: {}",
+            preview(raw)
+        )));
+    }
+    if failed > 0 && failed >= proxies.len() {
+        return Err(AppError::BadRequest(format!(
+            "URI 列表解析失败行数 ({failed}) ≥ 成功数 ({})，疑似上游格式不兼容/升级，\
+             拒绝用残缺结果覆盖缓存。前 200 字符: {}",
+            proxies.len(),
             preview(raw)
         )));
     }
@@ -199,6 +223,29 @@ mod tests {
     }
 
     #[test]
+    fn clash_proxies_null_element_is_rejected() {
+        // proxies 非空但元素是 null (无 type) → 二次确认加固应拒绝
+        let raw = "proxies:\n  - null\n";
+        assert!(normalize_to_clash_yaml(raw, SubFormat::Clash).is_err());
+    }
+
+    #[test]
+    fn clash_proxies_garbage_without_type_is_rejected() {
+        // 结构合法但每个元素都没有 type 键 → 拒绝
+        let raw = "proxies:\n  - {foo: bar}\n  - {baz: 1}\n";
+        assert!(normalize_to_clash_yaml(raw, SubFormat::Clash).is_err());
+    }
+
+    #[test]
+    fn uri_list_mostly_failed_is_rejected() {
+        // 5 行坏的 vless (已知 scheme 但解析失败) + 1 行好的 ss
+        // failed(5) >= proxies.len()(1) → 拒绝, 不静默成功
+        let raw = "vless://@:0?bad\nvless://@:0?bad\nvless://@:0?bad\nvless://@:0?bad\nvless://@:0?bad\nss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@1.2.3.4:8388#ok";
+        let res = normalize_to_clash_yaml(raw, SubFormat::Uri);
+        assert!(res.is_err(), "多数已知 scheme 行失败应被拒绝, 实际: {res:?}");
+    }
+
+    #[test]
     fn cf_challenge_html_is_rejected_not_empty_sub() {
         let html = "<!DOCTYPE html><html><head><title>Just a moment...</title></head><body>cf-ray</body></html>";
         // 既不是合法 clash，也不是 base64 节点，也没有 scheme 行 → 必须报错而非误判
@@ -233,7 +280,7 @@ mod tests {
             "hysteria2://auth@1.2.3.4:8443?sni=example.com&obfs=salamander&obfs-password=op#hy2".to_string(),
         ];
         for uri in &samples {
-            let proxies = super::uri::parse_lines(uri);
+            let (proxies, _failed) = super::uri::parse_lines(uri);
             assert_eq!(proxies.len(), 1, "解析失败: {uri}");
             let yaml = serde_yaml::to_string(&Value::Mapping(proxies[0].clone())).unwrap();
             crate::exit_node::service::validate_proxy_yaml(&yaml)
