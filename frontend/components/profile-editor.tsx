@@ -10,13 +10,15 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { NodePicker } from "@/components/node-picker";
 import { YamlDiff } from "@/components/yaml-diff";
 import { api } from "@/lib/api";
+import { getToken } from "@/lib/auth";
 import type { ExitNode, OutputProfile, UpstreamNode } from "@/lib/types";
-import { Cloud, Eye, Loader2 } from "lucide-react";
+import { Clipboard, Cloud, Eye, ExternalLink, Loader2 } from "lucide-react";
 
 type Form = {
   name: string;
@@ -72,6 +74,10 @@ export function ProfileEditor({
   const [previewText, setPreviewText] = useState("");
   const [previewUpstream, setPreviewUpstream] = useState("");
   const [previewing, setPreviewing] = useState(false);
+  // 「粘贴上游内容」：机场封服务器 IP 时, 用户在自己浏览器拉到内容手动粘贴更新
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteText, setPasteText] = useState("");
+  const [pasting, setPasting] = useState(false);
 
   const reset = useCallback(() => {
     if (initial) {
@@ -92,6 +98,8 @@ export function ProfileEditor({
     setErr(null);
     setInfo(null);
     setDraftId(null);
+    setPasteOpen(false);
+    setPasteText("");
   }, [initial]);
 
   useEffect(() => {
@@ -169,6 +177,86 @@ export function ProfileEditor({
   // 草稿 id：新建场景下点了"拉取节点"之后产生
   const [draftId, setDraftId] = useState<string | null>(null);
   const editingId = initial?.id ?? draftId;
+
+  // 把 profileId 的上游内容用 pasteText 原文 POST 上去 (text/plain 裸 fetch, 绕过 api.ts 的 JSON 封装).
+  // 成功后刷新节点复选框 (与 pullNodes 收尾一致).
+  async function postPaste(profileId: string) {
+    const token = getToken() || "";
+    const resp = await fetch(`/api/profiles/${profileId}/upstream-content`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "text/plain",
+      },
+      body: pasteText,
+    });
+    const text = await resp.text();
+    if (!resp.ok) {
+      // 后端错误体是 {error: "..."} JSON, 尽量取 error 字段, 取不到就用原文
+      let msg = text;
+      try {
+        const j = JSON.parse(text);
+        if (j && typeof j === "object" && "error" in j) msg = String(j.error);
+      } catch {
+        // 非 JSON, 用原文
+      }
+      throw new Error(msg || `HTTP ${resp.status}`);
+    }
+    let count: number | null = null;
+    try {
+      const j = JSON.parse(text);
+      if (j && typeof j === "object" && "node_count" in j) count = j.node_count;
+    } catch {
+      // ignore
+    }
+    return count;
+  }
+
+  async function submitPaste() {
+    setErr(null);
+    setInfo(null);
+    if (!pasteText.trim()) {
+      setErr("请先粘贴上游订阅内容");
+      return;
+    }
+    setPasting(true);
+    try {
+      let targetId = editingId;
+      // 新建场景: 先建 enabled=false 草稿拿 id, 再粘贴 (沿用 pullNodes 的草稿模式)
+      if (!targetId) {
+        if (!form.name.trim() || !form.upstream_url.trim()) {
+          setErr("先填好「名称」和「上游 URL」");
+          return;
+        }
+        const created = await api.post<OutputProfile>("/api/profiles", {
+          name: form.name,
+          upstream_url: form.upstream_url,
+          upstream_format: form.upstream_format,
+          bridge_node_names: [],
+          exit_node_ids: form.exit_node_ids,
+          fetch_via_exit_node_id: form.fetch_via_exit_node_id,
+          custom_rules: form.custom_rules || null,
+          enabled: false, // 草稿
+        });
+        targetId = created.id;
+        setDraftId(created.id);
+      }
+      const count = await postPaste(targetId);
+      // 刷新节点复选框 (同 pullNodes 收尾)
+      const ns = await api.get<UpstreamNode[]>(
+        `/api/profiles/${targetId}/nodes`,
+      );
+      setNodes(ns);
+      setInfo(`已解析 ${count ?? ns.length} 个节点。`);
+      setPasteOpen(false);
+      setPasteText("");
+      onSaved(); // 让父组件 list 刷新, 看到草稿 / 最近上游状态
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setPasting(false);
+    }
+  }
 
   async function save() {
     setErr(null);
@@ -316,6 +404,20 @@ export function ProfileEditor({
                 )}
                 拉取节点
               </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  setErr(null);
+                  setPasteOpen(true);
+                }}
+              >
+                <Clipboard className="h-4 w-4" />
+                粘贴上游内容
+              </Button>
+            </div>
+            <div className="text-xs text-muted-foreground">
+              机场封了服务器 IP / 有人机验证导致「拉取节点」失败时，可改用「粘贴上游内容」手动更新（用你本机浏览器拉取）。
             </div>
           </div>
 
@@ -480,6 +582,54 @@ export function ProfileEditor({
           </Button>
           <Button variant="outline" onClick={() => setPreviewOpen(false)}>
             关闭
+          </Button>
+        </DialogFooter>
+      </Dialog>
+
+      <Dialog open={pasteOpen} onOpenChange={setPasteOpen} size="lg">
+        <DialogHeader>
+          <DialogTitle>粘贴上游内容更新</DialogTitle>
+        </DialogHeader>
+        <DialogContent>
+          <div className="text-sm text-muted-foreground space-y-2">
+            <p>
+              机场封了服务器 IP / 有人机验证时，在你自己的浏览器里打开订阅 URL（用的是你本地 IP），全选复制整页内容粘贴到这里更新。
+            </p>
+            {form.upstream_url.trim() && (
+              <a
+                href={form.upstream_url}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1 text-primary hover:underline"
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+                在新标签打开订阅 URL
+              </a>
+            )}
+          </div>
+          <Textarea
+            value={pasteText}
+            onChange={(e) => setPasteText(e.target.value)}
+            placeholder="把订阅页面内容（Clash YAML / Base64 / 节点 URI 列表 / SIP008 JSON）整页粘贴到这里…"
+            className="min-h-[260px]"
+          />
+          {err && <div className="text-sm text-destructive">{err}</div>}
+        </DialogContent>
+        <DialogFooter>
+          <Button
+            variant="ghost"
+            onClick={() => setPasteOpen(false)}
+            disabled={pasting}
+          >
+            取消
+          </Button>
+          <Button onClick={submitPaste} disabled={pasting}>
+            {pasting ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Clipboard className="h-4 w-4" />
+            )}
+            提交更新
           </Button>
         </DialogFooter>
       </Dialog>

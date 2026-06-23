@@ -138,6 +138,9 @@ export default function ProfilesPage() {
           <p className="text-sm text-muted-foreground mt-1">
             每条配置 = 一个独立的输出订阅 URL
           </p>
+          <p className="text-xs text-muted-foreground mt-1">
+            机场封服务器 IP 时，可在「编辑」里用「粘贴上游内容」手动更新（用你本机浏览器拉取）。
+          </p>
         </div>
         <div className="flex gap-2">
           <Button variant="outline" onClick={load}>

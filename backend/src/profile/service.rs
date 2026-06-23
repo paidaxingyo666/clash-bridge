@@ -16,9 +16,12 @@ pub const TRIGGER_MANUAL: &str = "manual";
 pub const TRIGGER_AUTO: &str = "auto";
 /// 由客户端访问 /sub URL 触发的拉取
 pub const TRIGGER_CLIENT: &str = "client_fetch";
+/// 用户在自己浏览器拉到上游内容后手动粘贴更新 (绕过机场封服务器 IP)
+pub const TRIGGER_MANUAL_PASTE: &str = "manual_paste";
 
 /// 上游订阅 body 大小上限 (8 MiB). 超过即拒绝, 防止内存被超大响应撑爆.
-const MAX_UPSTREAM_BODY_BYTES: u64 = 8 * 1024 * 1024;
+/// handler 的「手动粘贴上游内容」端点也复用此上限做 body 大小校验.
+pub const MAX_UPSTREAM_BODY_BYTES: u64 = 8 * 1024 * 1024;
 
 /// 拉取上游订阅，把 yaml 文本存到 profile.last_upstream_yaml。
 /// 并在内容 hash 与上一条历史不同时，写一条新历史记录。
@@ -100,41 +103,18 @@ pub async fn refresh_upstream_by_profile(
                 return Err(AppError::Upstream(err));
             }
 
-            // 归一化层: 把任意订阅格式 (clash/base64/uri/sip008) 转成统一 IR =
-            // {proxies: [...]} 的 Clash YAML, 再存库. 下游 generator/extract_nodes 不变.
-            let hint = SubFormat::from_opt(profile.upstream_format.as_deref());
-            let clash_yaml = match parser::normalize_to_clash_yaml(&text, hint) {
-                Ok((yaml, _count)) => yaml,
-                Err(e) => {
-                    // 归一化失败: 不覆盖旧缓存 (yaml=None → COALESCE 保留), 仅落 error 状态.
-                    // userinfo 也传 None 保留旧值 (这次没拉成功的有效订阅, 不应覆盖流量配额).
-                    let err = format!("订阅格式解析失败: {e}");
-                    repo::save_upstream_fetch(db, profile.id, None, "error", Some(&err), Utc::now(), None)
-                        .await?;
-                    return Err(AppError::BadRequest(err));
-                }
-            };
-
-            // 写 profile 的 last_upstream_yaml (归一化后的 Clash YAML).
-            // 成功路径才透传上游 subscription-userinfo: 抽到值则传 Some(值), 上游没给则传 Some("")
-            // 显式清空 (避免节点已换源仍展示旧机场的过期配额). 用 as_deref 把 Option<String> 借成 Option<&str>.
-            repo::save_upstream_fetch(
+            // 归一化 → 存库 → 写历史. 这后半段被抽成公共函数, reqwest 拉取路径与
+            // 「手动粘贴上游内容」端点共用同一套处理.
+            // userinfo 透传规则与抽取前完全一致: 成功路径传 Some(抽到的值或空串"") —— 上游没给
+            // 头时显式清空, 避免节点已换源仍展示旧机场过期配额. 用 as_deref 借成 Option<&str>.
+            ingest_normalized_yaml(
                 db,
-                profile.id,
-                Some(&clash_yaml),
-                "success",
-                None,
-                Utc::now(),
+                profile,
+                &text,
                 Some(upstream_userinfo.as_deref().unwrap_or("")),
+                trigger,
             )
             .await?;
-            // dedup 写历史 (基于归一化后的内容 hash)
-            let hash = history_repo::hash_yaml(&clash_yaml);
-            let prev = history_repo::latest_hash(db, profile.id).await?;
-            if prev.as_deref() != Some(hash.as_str()) {
-                let cnt = history_repo::count_proxies(&clash_yaml);
-                history_repo::create(db, profile.id, &clash_yaml, &hash, cnt, trigger).await?;
-            }
             Ok(())
         }
         Err(e) => {
@@ -144,6 +124,65 @@ pub async fn refresh_upstream_by_profile(
             Err(AppError::Upstream(msg))
         }
     }
+}
+
+/// 归一化 → 存库 → 写历史 (公共后半段).
+///
+/// 从 `refresh_upstream_by_profile` 抽出, 供 reqwest 自动拉取与「手动粘贴上游内容」共用:
+/// 1. 按 profile.upstream_format 提示把 `raw` 归一化成 Clash `{proxies: [...]}` YAML;
+///    失败则落 error 状态 (yaml=None → COALESCE 保留旧缓存) 并返回 Err.
+/// 2. 成功则写 last_upstream_yaml + last_upstream_userinfo (userinfo 按调用方语义:
+///    reqwest 路径传 Some(头值或"") 显式清空, 手动粘贴无响应头传 None → COALESCE 保留旧值).
+/// 3. dedup 写历史 (基于归一化后内容 hash, 与上一条不同才写, 标 `trigger`).
+///
+/// 返回归一化后解析出的节点数.
+pub async fn ingest_normalized_yaml(
+    db: &PgPool,
+    profile: &OutputProfile,
+    raw: &str,
+    upstream_userinfo: Option<&str>,
+    trigger: &str,
+) -> AppResult<usize> {
+    // 归一化层: 把任意订阅格式 (clash/base64/uri/sip008) 转成统一 IR =
+    // {proxies: [...]} 的 Clash YAML, 再存库. 下游 generator/extract_nodes 不变.
+    let (clash_yaml, count) = match normalize_for_profile(profile, raw) {
+        Ok((yaml, count)) => (yaml, count),
+        Err(e) => {
+            // 归一化失败: 不覆盖旧缓存 (yaml=None → COALESCE 保留), 仅落 error 状态.
+            // userinfo 也传 None 保留旧值 (这次没拉成功的有效订阅, 不应覆盖流量配额).
+            let err = format!("订阅格式解析失败: {e}");
+            repo::save_upstream_fetch(db, profile.id, None, "error", Some(&err), Utc::now(), None)
+                .await?;
+            return Err(AppError::BadRequest(err));
+        }
+    };
+
+    // 写 profile 的 last_upstream_yaml (归一化后的 Clash YAML).
+    repo::save_upstream_fetch(
+        db,
+        profile.id,
+        Some(&clash_yaml),
+        "success",
+        None,
+        Utc::now(),
+        upstream_userinfo,
+    )
+    .await?;
+    // dedup 写历史 (基于归一化后的内容 hash)
+    let hash = history_repo::hash_yaml(&clash_yaml);
+    let prev = history_repo::latest_hash(db, profile.id).await?;
+    if prev.as_deref() != Some(hash.as_str()) {
+        let cnt = history_repo::count_proxies(&clash_yaml);
+        history_repo::create(db, profile.id, &clash_yaml, &hash, cnt, trigger).await?;
+    }
+    Ok(count)
+}
+
+/// 按 profile 的 upstream_format 提示, 把上游原文归一化成 Clash `{proxies: [...]}` YAML.
+/// 返回 `(clash_yaml, node_count)`. 不触库 — 抽出来便于单测「喂内容 → 节点数」的核心契约.
+fn normalize_for_profile(profile: &OutputProfile, raw: &str) -> AppResult<(String, usize)> {
+    let hint = SubFormat::from_opt(profile.upstream_format.as_deref());
+    parser::normalize_to_clash_yaml(raw, hint)
 }
 
 /// handler 用: 先按 user_id 查 profile, 再调 _by_profile
@@ -247,5 +286,72 @@ fn snippet(s: &str, max_chars: usize) -> String {
         format!("{take}…")
     } else {
         take
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use sqlx::types::Json as SqlxJson;
+    use uuid::Uuid;
+
+    /// 构造一个最小可用的 OutputProfile (只填归一化路径用到的字段, 其余给默认).
+    fn profile_with_format(fmt: Option<&str>) -> OutputProfile {
+        OutputProfile {
+            id: Uuid::nil(),
+            user_id: Uuid::nil(),
+            name: "t".into(),
+            sub_token: "tok".into(),
+            upstream_url: "https://example.com/sub".into(),
+            upstream_format: fmt.map(str::to_string),
+            last_upstream_yaml: None,
+            last_upstream_fetched_at: None,
+            last_upstream_fetch_status: None,
+            last_upstream_fetch_error: None,
+            last_upstream_userinfo: None,
+            bridge_node_names: SqlxJson(vec![]),
+            exit_node_ids: SqlxJson(vec![]),
+            fetch_via_exit_node_id: None,
+            custom_rules: None,
+            enabled: true,
+            cached_yaml: None,
+            cached_upstream_count: 0,
+            cached_bridge_count: 0,
+            cached_chain_count: 0,
+            cached_missing_bridges: SqlxJson(vec![]),
+            cached_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    /// ingest_normalized_yaml 的核心契约 = normalize_for_profile 把粘贴内容算出正确节点数.
+    /// (存库 / 写历史需 PgPool, 不在单测覆盖; 这里锁定「喂内容 → 节点数」这段纯逻辑.)
+    #[test]
+    fn normalize_for_profile_counts_clash_nodes() {
+        let raw = "proxies:\n  - {name: a, type: ss, server: 1.2.3.4, port: 8388, cipher: aes-256-gcm, password: pw}\n  - {name: b, type: ss, server: 5.6.7.8, port: 8388, cipher: aes-256-gcm, password: pw}\n";
+        // 显式 clash 提示
+        let (_yaml, n) = normalize_for_profile(&profile_with_format(Some("clash")), raw).unwrap();
+        assert_eq!(n, 2);
+        // auto 探测也应识别同样的 clash 内容
+        let (_yaml, n_auto) = normalize_for_profile(&profile_with_format(Some("auto")), raw).unwrap();
+        assert_eq!(n_auto, 2);
+    }
+
+    #[test]
+    fn normalize_for_profile_counts_base64_nodes() {
+        use base64::Engine;
+        let inner = "ss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@1.2.3.4:8388#n1\nss://YWVzLTI1Ni1nY206cGFzc3dvcmQ=@5.6.7.8:8388#n2";
+        let b64 = base64::engine::general_purpose::STANDARD.encode(inner.as_bytes());
+        let (_yaml, n) = normalize_for_profile(&profile_with_format(Some("base64")), &b64).unwrap();
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn normalize_for_profile_rejects_garbage() {
+        // CF challenge HTML 之类的垃圾内容: 既非合法订阅, 应报错而非误判成 0 节点成功.
+        let html = "<!DOCTYPE html><html><head><title>Just a moment...</title></head><body>cf-ray</body></html>";
+        assert!(normalize_for_profile(&profile_with_format(Some("auto")), html).is_err());
     }
 }

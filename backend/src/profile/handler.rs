@@ -124,6 +124,45 @@ pub async fn refresh_upstream(
     Ok(Json(OutputProfileView::from(&row)))
 }
 
+/// 手动粘贴上游订阅内容更新 (绕过机场封服务器 IP / 人机验证).
+///
+/// 用户在自己浏览器打开订阅 URL (本地放行 IP), 全选复制整页内容粘贴过来,
+/// 后端走与自动拉取相同的归一化处理. 无响应头, userinfo 传 None (COALESCE 保留旧配额).
+///
+/// extractor 顺序: State / AuthUser 都是 FromRequestParts (只读 parts), 必须在 body 之前;
+/// `body: String` 是 FromRequest, 会消费整个请求体, 必须放在最后一个参数.
+/// 路由层另套 DefaultBodyLimit 在进 handler 前就拦超大 body; 此处再按 byte 长度二次校验.
+pub async fn ingest_upstream_content(
+    State(s): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<Uuid>,
+    body: String,
+) -> AppResult<Json<serde_json::Value>> {
+    if body.trim().is_empty() {
+        return Err(AppError::BadRequest("粘贴内容为空".into()));
+    }
+    if body.len() as u64 > service::MAX_UPSTREAM_BODY_BYTES {
+        return Err(AppError::BadRequest(format!(
+            "粘贴内容过大 ({} 字节 > {} 字节上限)",
+            body.len(),
+            service::MAX_UPSTREAM_BODY_BYTES
+        )));
+    }
+    // 双匹配鉴权: 找不到当作 NotFound (与 /profiles/:id 端点一致, 不泄露归属).
+    let profile = repo::find(&s.db, user.id, id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let n = service::ingest_normalized_yaml(
+        &s.db,
+        &profile,
+        &body,
+        None,
+        service::TRIGGER_MANUAL_PASTE,
+    )
+    .await?;
+    Ok(Json(serde_json::json!({ "node_count": n })))
+}
+
 /// 返回 profile 上次拉到的上游中所有节点 (供前端复选框 UI)
 pub async fn list_upstream_nodes(
     State(s): State<AppState>,

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post, put};
 use axum::Router;
 use tower_governor::governor::GovernorConfigBuilder;
@@ -55,6 +56,13 @@ pub fn build(state: AppState) -> Router {
         )
         .route("/profiles/:id/reset-token", post(profile_h::reset_token))
         .route("/profiles/:id/refresh-upstream", post(profile_h::refresh_upstream))
+        // 手动粘贴上游内容: 单独套 8MiB body 上限, 在进 handler 前就拦超大 body.
+        // 仅对该路由生效 (route_layer 不影响 merge 进来的其他 /api/* 路由).
+        .route(
+            "/profiles/:id/upstream-content",
+            post(profile_h::ingest_upstream_content)
+                .route_layer(DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
         .route("/profiles/:id/nodes", get(profile_h::list_upstream_nodes))
         .route("/profiles/:id/upstream", get(profile_h::get_upstream_yaml))
         .route("/profiles/:id/generate", post(profile_h::generate))
